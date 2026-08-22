@@ -153,13 +153,7 @@ async function main() {
   if (args.help) { console.log(HELP); process.exit(0); }
   if (args.version) { console.log(`loop-agent v${VERSION}`); process.exit(0); }
 
-  // requiere prompt o referencia de sesion
-  const ref = args.deeplink || args.session || null;
-  if (!args.prompt && !ref) {
-    log.err('Debes indicar --prompt (tarea nueva) o --session/--deeplink (reanudar).');
-    console.log(HELP);
-    process.exit(1);
-  }
+  // carga tarea desde archivo antes de validar
   if (args.promptFile) {
     try {
       args.prompt = fs.readFileSync(path.resolve(args.promptFile), 'utf8');
@@ -167,6 +161,14 @@ async function main() {
       log.err(`No se pudo leer --prompt-file: ${e.message}`);
       process.exit(1);
     }
+  }
+
+  // requiere prompt o referencia de sesion
+  const ref = args.deeplink || args.session || null;
+  if (!args.prompt && !ref) {
+    log.err('Debes indicar --prompt (tarea nueva) o --session/--deeplink (reanudar).');
+    console.log(HELP);
+    process.exit(1);
   }
 
   const cfg = loadConfig(args);
