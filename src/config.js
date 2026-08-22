@@ -14,6 +14,7 @@ const DEFAULTS = {
   sentinel: '[TASK_COMPLETE]',
   todoDetection: true,
   autoApprove: false,
+  discover: true,
   keepServer: false,
   verbose: false,
   model: null,
@@ -68,6 +69,7 @@ function loadConfig(args = {}) {
 
   applyEnv(cfg);
 
+  cfg.dir = dir;
   if (args.port != null) cfg.port = num(args.port, cfg.port);
   if (args.hostname != null) cfg.hostname = args.hostname;
   if (args.maxIterations != null) cfg.maxIterations = num(args.maxIterations, cfg.maxIterations);
@@ -84,6 +86,7 @@ function loadConfig(args = {}) {
   if (args.attach != null) cfg.attach = args.attach;
   if (args.noTodos) cfg.todoDetection = false;
   if (args.autoApprove) cfg.autoApprove = true;
+  if (args.noDiscover) cfg.discover = false;
   if (args.keepServer) cfg.keepServer = true;
   if (args.verbose) cfg.verbose = true;
 

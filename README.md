@@ -41,9 +41,15 @@ node bin/loop-agent.js --dir "D:\mi\proyecto" --prompt "..." --auto-approve --ma
 
 ```
 ┌────────────────────────────────────────────────────────────┐
-│ 1. GET /global/health → ¿hay servidor? si no:              │
-│      spawn `opencode serve --port 4567` (auto-detecta bin) │
-│ 2. Sesión:                                                 │
+│ 1. Conexion (en orden):                                    │
+│    a. --attach <url> explicito                             │
+│    b. health en puerto configurado                         │
+│    c. descubrimiento de procesos opencode locales          │
+│       (TUI o sidecar de la app escritorio)                 │
+│    d. spawn dedicado: `opencode serve --port N`            │
+│       con cwd = --dir (reintento con config aislada        │
+│       si el config global es incompatible)                 │
+│ 2. Sesion:                                                 │
 │      POST /session            (modo tarea nueva)           │
 │      GET  /session/:id        (modo reanudar, valida ID)   │
 │ 3. BUCLE (hasta maxIterations):                            │
@@ -129,6 +135,8 @@ loop-agent --help
 | Problema | Solución |
 |----------|----------|
 | `No se encontro el binario "opencode"` | Define `OPENCODE_BIN` o instala opencode |
+| `El config global de opencode es invalido` | La herramienta lo resuelve sola: reintenta con una configuracion aislada temporal (`XDG_CONFIG_HOME`). Nota: en ese modo los MCPs del config global no cargan en el servidor dedicado |
+| El agente no crea archivos en tu proyecto con servidor dedicado | Asegurate de pasar `--dir` apuntando al proyecto; el servidor headless hereda ese directorio como raiz |
 | El servidor no responde tras 90s | Prueba otro puerto: `--port 4568`; revisa que no haya firewall bloqueando localhost |
 | La sesión queda esperando sin avanzar | Probablemente un permiso pendiente: usa `--auto-approve` o ajusta permisos del proyecto |
 | Respuestas vacías repetidas | Verifica autenticación del proveedor (`opencode auth login`) y prueba `--model proveedor/modelo` |

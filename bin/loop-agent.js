@@ -39,6 +39,7 @@ LIMITES Y SEGURIDAD:
   --sentinel <marcador>  Marcador de finalizacion (default: "[TASK_COMPLETE]")
   --no-todos             Desactiva deteccion por lista de todos
   --auto-approve         Aprueba automaticamente peticiones de permisos (headless)
+  --no-discover          No buscar servidores opencode ya corriendo; lanza uno dedicado
 
 SERVIDOR:
   --port <n>             Puerto del servidor headless (default: 4567 o LOOP_PORT)
@@ -73,6 +74,7 @@ function parseArgs(argv) {
     if (!a.startsWith('--')) throw new Error(`Argumento inesperado: ${a}`);
     if (a === '--no-todos') { args.noTodos = true; continue; }
     if (a === '--auto-approve') { args.autoApprove = true; continue; }
+    if (a === '--no-discover') { args.noDiscover = true; continue; }
     if (a === '--keep-server') { args.keepServer = true; continue; }
     if (a === '--verbose') { args.verbose = true; continue; }
     if (!withValue.has(a)) throw new Error(`Flag desconocido: ${a}`);

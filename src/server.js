@@ -104,12 +104,14 @@ function findBinary(explicit) {
   );
 }
 
-function spawnServe(bin, cfg) {
+function spawnServe(bin, cfg, extraEnv) {
   const useShell = process.platform === 'win32' && !/\.(exe)$/i.test(bin);
   const proc = spawn(bin, ['serve', '--port', String(cfg.port), '--hostname', cfg.hostname], {
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
     shell: useShell,
+    cwd: cfg.dir || undefined,
+    env: { ...process.env, ...(extraEnv || {}) },
   });
   let stderrTail = '';
   proc.stderr.on('data', (d) => {
@@ -117,6 +119,17 @@ function spawnServe(bin, cfg) {
   });
   proc.on('error', () => {});
   return { proc, getStderr: () => stderrTail };
+}
+
+// crea un directorio con configuracion minima vacia para aislar al servidor
+// de un config global del usuario que la version instalada no entienda
+function isolatedConfigDir() {
+  const dir = path.join(os.tmpdir(), 'loop-agent-config-iso');
+  const sub = path.join(dir, 'opencode');
+  fs.mkdirSync(sub, { recursive: true });
+  const file = path.join(sub, 'opencode.json');
+  if (!fs.existsSync(file)) fs.writeFileSync(file, '{}\n');
+  return dir;
 }
 
 function killTree(proc) {
@@ -178,33 +191,55 @@ async function ensureServer(cfg, log) {
     return { base: cfg.base, owned: false, proc: null };
   }
 
-  for (const port of discoverLocalServerPorts()) {
-    const base = `http://127.0.0.1:${port}`;
-    const v = await health(base);
-    if (v) {
-      log.ok(`Servidor opencode descubierto en ${base} (v${v}), modo adjunto`);
-      return { base, owned: false, proc: null };
+  if (cfg.discover) {
+    for (const port of discoverLocalServerPorts()) {
+      const base = `http://127.0.0.1:${port}`;
+      const v = await health(base);
+      if (v) {
+        log.ok(`Servidor opencode descubierto en ${base} (v${v}), modo adjunto`);
+        return { base, owned: false, proc: null };
+      }
+      log.debug(`Puerto ${port} pertenece a un proceso opencode pero no responde health (posible basic auth)`);
     }
-    log.debug(`Puerto ${port} pertenece a un proceso opencode pero no responde health (posible basic auth)`);
   }
 
   const bin = findBinary(cfg.opencodeBin);
   log.info(`Iniciando servidor headless: ${bin} serve --port ${cfg.port}`);
-  const { proc, getStderr } = spawnServe(bin, cfg);
-  const deadline = Date.now() + 90 * 1000;
-  while (Date.now() < deadline) {
-    if (proc.exitCode !== null) {
-      throw new Error(`El proceso del servidor murio (codigo ${proc.exitCode}). STDERR:\n${getStderr() || '(vacio)'}`);
+
+  const attempts = [{ env: null }];
+  let retriedIsolated = false;
+
+  for (const attempt of attempts) {
+    const { proc, getStderr } = spawnServe(bin, cfg, attempt.env);
+    const deadline = Date.now() + 90 * 1000;
+    let started = false;
+    while (Date.now() < deadline) {
+      if (proc.exitCode !== null) break;
+      const version = await health(cfg.base);
+      if (version) {
+        log.ok(`Servidor listo en ${cfg.base} (v${version})`);
+        if (retriedIsolated) {
+          log.warn('Se aisló la configuración (XDG_CONFIG_HOME temporal) porque el config global no es compatible con esta versión de opencode. MCPs y ajustes del config global NO se cargaron en este servidor.');
+        }
+        return { base: cfg.base, owned: true, proc };
+      }
+      await new Promise((r) => setTimeout(r, 700));
     }
-    version = await health(cfg.base);
-    if (version) {
-      log.ok(`Servidor listo en ${cfg.base} (v${version})`);
-      return { base: cfg.base, owned: true, proc };
+
+    const errTail = getStderr();
+    await killTree(proc);
+
+    // config global incompatible → reintento con config aislada
+    if (!started && proc.exitCode !== null && /Configuration is invalid/i.test(errTail) && !retriedIsolated) {
+      log.warn('El config global de opencode es invalido para esta version del CLI. Reintentando con configuracion aislada...');
+      attempts.push({ env: { XDG_CONFIG_HOME: isolatedConfigDir() } });
+      retriedIsolated = true;
+      continue;
     }
-    await new Promise((r) => setTimeout(r, 700));
+
+    throw new Error(`El proceso del servidor murio (codigo ${proc.exitCode}). STDERR:\n${errTail || '(vacio)'}`);
   }
-  await killTree(proc);
-  throw new Error(`El servidor no respondio /global/health tras 90s. STDERR:\n${getStderr() || '(vacio)'}`);
+  throw new Error('No se pudo iniciar el servidor headless');
 }
 
 async function stopServer(handle) {
