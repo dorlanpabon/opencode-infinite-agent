@@ -1,0 +1,19 @@
+{
+  "port": 4567,
+  "hostname": "127.0.0.1",
+  "maxIterations": 100,
+  "delayMs": 4000,
+  "retries": 3,
+  "retryDelayMs": 4000,
+  "maxConsecutiveErrors": 4,
+  "stallTimeoutMin": 20,
+  "pollMs": 2000,
+  "sentinel": "[TASK_COMPLETE]",
+  "todoDetection": true,
+  "autoApprove": false,
+  "keepServer": false,
+  "verbose": false,
+  "model": null,
+  "agent": null,
+  "title": null
+}

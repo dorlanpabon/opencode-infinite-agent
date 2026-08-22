@@ -1,0 +1,16 @@
+{
+  "name": "opencode-infinite-agent",
+  "version": "1.0.0",
+  "description": "Agente ilimitado: bucle automatico sobre una sesion de opencode hasta completar la tarea (sentinel + todos)",
+  "type": "commonjs",
+  "bin": {
+    "loop-agent": "bin/loop-agent.js"
+  },
+  "scripts": {
+    "start": "node bin/loop-agent.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
