@@ -81,6 +81,7 @@ function loadConfig(args = {}) {
   if (args.model != null) cfg.model = args.model;
   if (args.agent != null) cfg.agent = args.agent;
   if (args.title != null) cfg.title = args.title;
+  if (args.attach != null) cfg.attach = args.attach;
   if (args.noTodos) cfg.todoDetection = false;
   if (args.autoApprove) cfg.autoApprove = true;
   if (args.keepServer) cfg.keepServer = true;
@@ -93,6 +94,7 @@ function loadConfig(args = {}) {
   if (!cfg.sentinel || typeof cfg.sentinel !== 'string') throw new Error('sentinel invalido en configuracion');
   if (cfg.maxIterations < 1) throw new Error('maxIterations debe ser >= 1');
   if (cfg.delayMs < 0) throw new Error('delayMs no puede ser negativo');
+  if (cfg.attach && !/^https?:\/\//i.test(cfg.attach)) throw new Error('--attach debe ser una URL http(s), ej: http://127.0.0.1:4096');
 
   return cfg;
 }

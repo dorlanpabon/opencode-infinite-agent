@@ -78,6 +78,8 @@ function findBinary(explicit) {
   const appdata = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
   const localappdata = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
   const winCandidates = [
+    path.join(localappdata, 'opencode', 'opencode-cli.exe'),
+    path.join(localappdata, 'opencode', 'opencode.exe'),
     path.join(home, '.local', 'bin', 'opencode.exe'),
     path.join(home, '.bun', 'bin', 'opencode.exe'),
     path.join(appdata, 'npm', 'opencode.cmd'),
@@ -135,12 +137,57 @@ function killTree(proc) {
   });
 }
 
+// busca puertos de escucha de procesos opencode ya corriendo (TUI o app escritorio)
+function discoverLocalServerPorts() {
+  const ports = [];
+  if (process.platform !== 'win32') return ports;
+  const { execSync } = require('child_process');
+  const opts = { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 16 * 1024 * 1024 };
+  try {
+    const tasklist = execSync('tasklist /FO CSV /NH', opts);
+    const pids = new Set();
+    for (const line of tasklist.split(/\r?\n/)) {
+      const m = /^"([^"]+)","(\d+)"/.exec(line.trim());
+      if (m && /opencode/i.test(m[1])) pids.add(m[2]);
+    }
+    if (!pids.size) return ports;
+    const netstat = execSync('netstat -ano', opts);
+    for (const line of netstat.split(/\r?\n/)) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 5 || parts[0] !== 'TCP' || parts[3] !== 'LISTENING' || !pids.has(parts[4])) continue;
+      const local = parts[1];
+      if (!/^(127\.0\.0\.1|0\.0\.0\.0|\[::1\]|\[::\]):/.test(local)) continue;
+      const port = parseInt(local.split(':').pop(), 10);
+      if (port > 0 && !ports.includes(port)) ports.push(port);
+    }
+  } catch {}
+  return ports;
+}
+
 async function ensureServer(cfg, log) {
+  if (cfg.attach) {
+    const version = await health(cfg.attach);
+    if (!version) throw new Error(`No se pudo adjuntar a ${cfg.attach} (sin respuesta o credenciales incorrectas). Define OPENCODE_SERVER_PASSWORD si el servidor usa basic auth.`);
+    log.ok(`Modo adjunto a ${cfg.attach} (v${version})`);
+    return { base: cfg.attach, owned: false, proc: null };
+  }
+
   let version = await health(cfg.base);
   if (version) {
     log.ok(`Servidor opencode ya activo en ${cfg.base} (v${version}), modo adjunto`);
     return { base: cfg.base, owned: false, proc: null };
   }
+
+  for (const port of discoverLocalServerPorts()) {
+    const base = `http://127.0.0.1:${port}`;
+    const v = await health(base);
+    if (v) {
+      log.ok(`Servidor opencode descubierto en ${base} (v${v}), modo adjunto`);
+      return { base, owned: false, proc: null };
+    }
+    log.debug(`Puerto ${port} pertenece a un proceso opencode pero no responde health (posible basic auth)`);
+  }
+
   const bin = findBinary(cfg.opencodeBin);
   log.info(`Iniciando servidor headless: ${bin} serve --port ${cfg.port}`);
   const { proc, getStderr } = spawnServe(bin, cfg);

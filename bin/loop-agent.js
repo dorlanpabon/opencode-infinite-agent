@@ -43,6 +43,8 @@ LIMITES Y SEGURIDAD:
 SERVIDOR:
   --port <n>             Puerto del servidor headless (default: 4567 o LOOP_PORT)
   --hostname <host>      Hostname (default: 127.0.0.1)
+  --attach <url>         Adjuntarse a un servidor opencode ya corriendo
+                         (ej: http://127.0.0.1:4096; usa OPENCODE_SERVER_PASSWORD si tiene auth)
   --keep-server          No apagar el servidor headless al terminar
 
 OTROS:
@@ -62,7 +64,7 @@ function parseArgs(argv) {
   const withValue = new Set([
     '--dir', '--prompt', '--prompt-file', '--session', '--deeplink', '--model', '--agent',
     '--title', '--config', '--port', '--hostname', '--max-iterations', '--delay-ms',
-    '--retries', '--retry-delay-ms', '--stall-timeout-min', '--sentinel',
+    '--retries', '--retry-delay-ms', '--stall-timeout-min', '--sentinel', '--attach',
   ]);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -81,10 +83,18 @@ function parseArgs(argv) {
   return args;
 }
 
+function normalizeKeys(args) {
+  const out = {};
+  for (const [k, v] of Object.entries(args)) {
+    out[k.replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = v;
+  }
+  return out;
+}
+
 async function main() {
   let args;
   try {
-    args = parseArgs(process.argv.slice(2));
+    args = normalizeKeys(parseArgs(process.argv.slice(2)));
   } catch (e) {
     log.err(e.message);
     console.log(HELP);
