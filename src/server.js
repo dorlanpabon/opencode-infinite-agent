@@ -247,7 +247,11 @@ async function stopServer(handle) {
   await killTree(handle.proc);
 }
 
-function startEventListener({ base, sessionId, onResponseSent, debug }) {
+// escucha el stream /event y responde automaticamente las peticiones de permiso
+// eventos: permission.asked | permission.v2.asked
+// respuesta: endpoint nuevo POST /permission/:id/reply {reply} con fallback al
+// viejo POST /session/:id/permissions/:pid {response}
+function startEventListener({ base, sessionId, onResponseSent, debug, reply = 'once' }) {
   const ctl = new AbortController();
   (async () => {
     try {
@@ -255,7 +259,10 @@ function startEventListener({ base, sessionId, onResponseSent, debug }) {
         headers: { accept: 'text/event-stream', ...authHeaders() },
         signal: ctl.signal,
       });
-      if (!res.ok || !res.body) return;
+      if (!res.ok || !res.body) {
+        if (debug) debug(`SSE /event no disponible (${res.status})`);
+        return;
+      }
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buf = '';
@@ -271,13 +278,26 @@ function startEventListener({ base, sessionId, onResponseSent, debug }) {
           try {
             const ev = JSON.parse(line.slice(5).trim());
             const type = String(ev.type || ev.name || '');
-            if (/permission/i.test(type)) {
-              const payload = ev.properties || ev.payload || ev.attributes || {};
-              const sid = payload.sessionID || sessionId;
+            if (/permission/i.test(type) && /(ask|request)/i.test(type)) {
+              const payload = ev.properties || ev.data || ev.payload || ev.attributes || {};
               const pid = payload.id || payload.permissionID;
-              if (pid && sid) {
-                await request(base, 'POST', `/session/${sid}/permissions/${pid}`, { response: 'once' }, { timeoutMs: 10000 });
-                if (onResponseSent) onResponseSent(sid, pid);
+              const sid = payload.sessionID || sessionId;
+              if (!pid || !sid) continue;
+              let via = null;
+              try {
+                await request(base, 'POST', `/permission/${pid}/reply`, { reply }, { timeoutMs: 10000 });
+                via = 'nuevo';
+              } catch {}
+              if (!via) {
+                try {
+                  await request(base, 'POST', `/session/${sid}/permissions/${pid}`, { response: reply }, { timeoutMs: 10000 });
+                  via = 'legado';
+                } catch {}
+              }
+              if (onResponseSent && via) {
+                onResponseSent(sid, pid, payload.permission || type, via);
+              } else if (debug) {
+                debug(`permiso ${pid}: no se pudo responder por ningun endpoint`);
               }
             }
           } catch (e) {
@@ -292,4 +312,4 @@ function startEventListener({ base, sessionId, onResponseSent, debug }) {
   return ctl;
 }
 
-module.exports = { request, health, findBinary, ensureServer, stopServer, startEventListener };
+module.exports = { request, health, findBinary, ensureServer, stopServer, startEventListener, authHeaders };

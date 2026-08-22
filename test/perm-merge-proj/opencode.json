@@ -1,0 +1,22 @@
+{
+  "model": "anthropic/claude-sonnet-4-5",
+  "permission": {
+    "bash": {
+      "*": "allow",
+      "git *": "allow"
+    },
+    "edit": "allow",
+    "webfetch": "allow",
+    "external_directory": {
+      "**": "allow"
+    }
+  },
+  "mcp": {
+    "memory": {
+      "type": "remote",
+      "enabled": true,
+      "url": "https://mcp.mem0.ai/mcp"
+    }
+  },
+  "$schema": "https://opencode.ai/config.json"
+}

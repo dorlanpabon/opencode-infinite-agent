@@ -18,6 +18,12 @@ USO:
   loop-agent --prompt "tarea..." [opciones]
   loop-agent --session ses_xxxxxxxx [opciones]
   loop-agent --deeplink "oc://renderer/server/.../session/ses_xxxxxxxx" [opciones]
+  loop-agent init-permissions [--dir <ruta>]     pre-autoriza permisos en el proyecto
+
+COMANDOS:
+  init-permissions    Crea/fusiona opencode.json en --dir (o cwd) con permisos
+                      allow-all: edit, bash, webfetch y external_directory.
+                      Evita TODOS los dialogos "Permission required" del proyecto.
 
 MODOS:
   --prompt <texto>       Tarea nueva (crea sesion). Obligatoria si no hay session/deeplink.
@@ -93,7 +99,48 @@ function normalizeKeys(args) {
   return out;
 }
 
+// pre-autoriza permisos en el proyecto para evitar dialogos "Permission required"
+function runInitPermissions(argv) {
+  let dir = process.cwd();
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--dir' && argv[i + 1]) { dir = path.resolve(argv[++i]); }
+    if (argv[i] === '-h' || argv[i] === '--help') { console.log('Uso: loop-agent init-permissions [--dir <ruta>]'); process.exit(0); }
+  }
+  if (!fs.existsSync(dir)) {
+    log.err(`El directorio no existe: ${dir}`);
+    process.exit(1);
+  }
+  const file = path.join(dir, 'opencode.json');
+  let cfgJson = {};
+  if (fs.existsSync(file)) {
+    try {
+      // tolera BOM UTF-8 que muchos editores de Windows agregan
+      const raw = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '').trim();
+      cfgJson = raw ? JSON.parse(raw) : {};
+    } catch {
+      log.err(`opencode.json existente no es JSON valido: ${file}`);
+      process.exit(1);
+    }
+  }
+  cfgJson.$schema = cfgJson.$schema || 'https://opencode.ai/config.json';
+  cfgJson.permission = { ...(cfgJson.permission || {}) };
+  cfgJson.permission.edit = 'allow';
+  cfgJson.permission.bash = { '*': 'allow', ...(typeof cfgJson.permission.bash === 'object' ? cfgJson.permission.bash : {}) };
+  cfgJson.permission.webfetch = 'allow';
+  cfgJson.permission.external_directory = { '**': 'allow', ...(typeof cfgJson.permission.external_directory === 'object' ? cfgJson.permission.external_directory : {}) };
+  fs.writeFileSync(file, JSON.stringify(cfgJson, null, 2) + '\n');
+  log.ok(`Permisos pre-autorizados en: ${file}`);
+  console.log('  edit=allow | bash=allow-all | webfetch=allow | external_directory=allow');
+  process.exit(0);
+}
+
 async function main() {
+  // subcomando: init-permissions (no requiere servidor ni sesion)
+  if (process.argv[2] === 'init-permissions') {
+    runInitPermissions(process.argv.slice(3));
+    return;
+  }
+
   let args;
   try {
     args = normalizeKeys(parseArgs(process.argv.slice(2)));

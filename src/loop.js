@@ -52,7 +52,7 @@ async function exchange(req, sessionId, text, cfg, flag) {
     if (reply) return reply;
   }
   try { await req('POST', `/session/${sessionId}/abort`, {}); } catch {}
-  throw new LoopStalled(`Sin respuesta del agente tras ${cfg.stallTimeoutMin} min`);
+  throw new LoopStalled(`Sin respuesta del agente tras ${cfg.stallTimeoutMin} min. Causa probable: dialogo de permiso pendiente. Soluciones: --auto-approve o ejecutar antes "loop-agent init-permissions --dir <proyecto>"`);
 }
 
 // motor principal: itera hasta sentinel / todos completos / limites

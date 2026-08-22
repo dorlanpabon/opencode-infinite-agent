@@ -110,17 +110,43 @@ Variables de entorno soportadas:
 
 Precedencia: CLI > entorno > archivo > defaults.
 
-## Permisos en modo headless
+## Permisos y diálogos "Permission required"
 
-Un servidor headless no puede preguntarte permisos por terminal. Dos opciones:
+Cuando el agente necesita hacer algo sensible (editar archivos, ejecutar bash, **acceder a rutas fuera del proyecto**), opencode puede mostrar `Permission required` y esperar confirmación — lo cual congela un bucle automático. La clave `external_directory` viene en modo `"ask"` por defecto: eso causa el diálogo *"Access files outside the project directory"*.
 
-1. **Recomendada**: configura permisos en el `opencode.json` del proyecto:
-   ```json
-   {
-     "permission": { "edit": "allow", "bash": { "*": "allow" } }
-   }
-   ```
-2. O usa `--auto-approve`: la herramienta escucha el stream `/event` y responde automáticamente las peticiones de permiso (respuesta `once`).
+La herramienta lo resuelve con 3 capas:
+
+### Capa 1 — Pre-autorizar por configuración (recomendada)
+
+```bash
+node bin/loop-agent.js init-permissions --dir "D:\tu\proyecto"
+```
+
+Crea o fusiona el `opencode.json` del proyecto con permisos allow-all (preserva tu config existente):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "edit": "allow",
+    "bash": { "*": "allow" },
+    "webfetch": "allow",
+    "external_directory": { "**": "allow" }
+  }
+}
+```
+
+Esto elimina los diálogos de ese proyecto tanto en la herramienta como en la app/TUI interactiva. Puedes afinar patrones manualmente, ej: `"external_directory": { "~/proyectos/**": "allow" }` (última regla que coincide gana).
+
+### Capa 2 — Auto-aprobar en vivo (`--auto-approve`)
+
+La herramienta escucha el stream `/event` del servidor y responde automáticamente cada `permission.asked` (endpoints `POST /permission/:id/reply` nuevo, con fallback al legado por sesión). Cubre cualquier permiso no previsto en la config, sin tocar tus archivos.
+
+### Capa 3 — Recuperación ante bloqueos
+
+Si aun así una iteración se queda sin respuesta, tras `--stall-timeout-min` el bucle aborta la sesión, reintenta y te lo reporta claramente. Nunca queda colgado indefinidamente.
+
+> Nota: la app escritorio define `OPENCODE_SERVER_PASSWORD` global; los servidores que esta herramienta lanza heredan esa credencial y todas sus peticiones van autenticadas automáticamente.
 
 ## Instalación global (opcional)
 
