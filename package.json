@@ -1,16 +1,82 @@
 {
   "name": "opencode-infinite-agent",
-  "version": "1.0.0",
-  "description": "Agente ilimitado: bucle automatico sobre una sesion de opencode hasta completar la tarea (sentinel + todos)",
+  "version": "2.0.0",
+  "productName": "OpenCode Infinite",
+  "description": "Event-driven desktop supervisor that continues OpenCode sessions until verified completion",
+  "author": "dorlanpabon",
+  "homepage": "https://github.com/dorlanpabon/opencode-infinite-agent#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dorlanpabon/opencode-infinite-agent.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dorlanpabon/opencode-infinite-agent/issues"
+  },
   "type": "commonjs",
+  "main": "dist/desktop/main.js",
   "bin": {
     "loop-agent": "bin/loop-agent.js"
   },
+  "files": [
+    "bin",
+    "src/*.js",
+    "dist",
+    ".looprc.example.json",
+    "forge.config.cjs",
+    "README.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
   "scripts": {
-    "start": "node bin/loop-agent.js"
+    "clean": "node scripts/clean.mjs",
+    "build": "npm run clean --silent && tsc -p tsconfig.renderer.json && tsc -p tsconfig.json && node scripts/copy-desktop-assets.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
+    "test:core": "node --test \"test/*.test.js\"",
+    "test": "npm run build --silent && npm run test:core --silent",
+    "check": "npm run typecheck && npm test && npm pack --dry-run && npm audit --audit-level=high",
+    "start": "npm run desktop",
+    "cli": "node bin/loop-agent.js",
+    "desktop": "npm run build --silent && electron .",
+    "desktop:dev": "npm run build && electron-forge start",
+    "desktop:package": "npm run build && node scripts/package-desktop.mjs && node scripts/harden-desktop-package.mjs",
+    "desktop:smoke": "node scripts/smoke-desktop-package.mjs",
+    "desktop:make": "npm run desktop:package && electron-forge make --skip-package",
+    "prepack": "npm run build"
   },
+  "keywords": [
+    "opencode",
+    "desktop",
+    "agent",
+    "sse",
+    "automation"
+  ],
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "overrides": {
+    "@electron/packager": "20.3.0",
+    "cacache": "20.0.4",
+    "make-fetch-happen": "15.0.6",
+    "tar": "7.5.22",
+    "tmp": "0.2.7"
+  },
+  "dependencies": {
+    "electron-squirrel-startup": "^1.0.1"
+  },
+  "devDependencies": {
+    "@electron-forge/cli": "^7.11.2",
+    "@electron-forge/maker-deb": "^7.11.2",
+    "@electron-forge/maker-rpm": "^7.11.2",
+    "@electron-forge/maker-squirrel": "^7.11.2",
+    "@electron-forge/maker-zip": "^7.11.2",
+    "@electron/asar": "^4.3.0",
+    "@electron/fuses": "^2.1.3",
+    "@electron/packager": "20.3.0",
+    "@types/electron-squirrel-startup": "^1.0.2",
+    "@types/node": "^22.20.1",
+    "electron": "^43.4.1",
+    "playwright": "^1.62.1",
+    "typescript": "^7.0.2"
+  }
 }

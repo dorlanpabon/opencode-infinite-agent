@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
+    >
+    <title>OpenCode Infinite</title>
+    <link rel="stylesheet" href="/app.css">
+  </head>
+  <body>
+    <a class="skip-link" href="#workspace-main">Saltar al contenido</a>
+
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Ejecuciones">
+        <header class="brand">
+          <span class="brand-glyph" aria-hidden="true">∞</span>
+          <span>
+            <strong>OpenCode Infinite</strong>
+            <small>Event-driven supervisor</small>
+          </span>
+        </header>
+
+        <button class="connection-card" id="doctor-button" type="button">
+          <span class="signal signal--pending" id="doctor-signal" aria-hidden="true"></span>
+          <span>
+            <small>Motor OpenCode</small>
+            <strong id="doctor-label">Comprobando…</strong>
+          </span>
+          <span class="connection-arrow" aria-hidden="true">↗</span>
+        </button>
+
+        <button class="button button--primary new-run" id="new-run-button" type="button">
+          <span aria-hidden="true">＋</span>
+          Nueva ejecución
+          <kbd>Ctrl N</kbd>
+        </button>
+
+        <div class="sidebar-heading">
+          <span>Historial</span>
+          <span class="count" id="run-count">0</span>
+        </div>
+        <nav class="run-list" id="run-list" aria-label="Historial de ejecuciones"></nav>
+        <p class="sidebar-empty" id="run-list-empty">Todavía no hay ejecuciones guardadas.</p>
+
+        <footer class="sidebar-footer">
+          <span id="app-version">Cargando versión…</span>
+          <span class="local-badge">LOCAL</span>
+        </footer>
+      </aside>
+
+      <main class="workspace" id="workspace-main" tabindex="-1">
+        <section class="empty-state" id="empty-state" aria-labelledby="empty-title">
+          <div class="empty-orbit" aria-hidden="true"><span>∞</span></div>
+          <p class="eyebrow">Continuación por eventos</p>
+          <h1 id="empty-title">Sigue trabajando cuando el turno realmente termina.</h1>
+          <p>OpenCode Infinite espera la detención confirmada del agente. No dispara mensajes por intervalos.</p>
+          <button class="button button--primary" id="empty-new-run-button" type="button">Crear primera ejecución</button>
+        </section>
+
+        <article class="run-detail" id="run-detail" hidden>
+          <header class="run-header">
+            <div class="run-heading">
+              <div class="heading-meta">
+                <span class="status-pill" id="run-status">Inicializando</span>
+                <span id="run-updated">—</span>
+              </div>
+              <h1 id="run-name">Ejecución</h1>
+              <p id="run-task">—</p>
+            </div>
+            <button class="button button--danger" id="stop-run-button" type="button">
+              <span aria-hidden="true">■</span>
+              Detener
+            </button>
+          </header>
+
+          <section class="metrics" aria-label="Métricas de ejecución">
+            <div class="metric">
+              <span>Iteraciones</span>
+              <strong id="metric-iterations">0 / 0</strong>
+              <progress id="iteration-progress" value="0" max="1">0%</progress>
+            </div>
+            <div class="metric">
+              <span>Transporte SSE</span>
+              <strong class="metric-state" id="metric-sse">Desconectado</strong>
+              <small>Detección del ciclo</small>
+            </div>
+            <div class="metric">
+              <span>Tokens</span>
+              <strong id="metric-tokens">0</strong>
+              <small id="metric-token-detail">0 entrada · 0 salida</small>
+            </div>
+            <div class="metric">
+              <span>Coste estimado</span>
+              <strong id="metric-cost">$0.0000</strong>
+              <small id="metric-runtime">0 min</small>
+            </div>
+          </section>
+
+          <section class="cycle-card" aria-labelledby="cycle-title">
+            <header class="section-heading">
+              <span>
+                <small class="eyebrow">Estado del supervisor</small>
+                <h2 id="cycle-title">Ciclo dirigido por eventos</h2>
+              </span>
+              <span class="event-clock" id="event-clock">Sin eventos</span>
+            </header>
+            <ol class="cycle-track" id="cycle-track">
+              <li data-phase="connecting"><span>1</span><strong>Conectar</strong><small>SSE abierto</small></li>
+              <li data-phase="working"><span>2</span><strong>Trabajar</strong><small>Turno ocupado</small></li>
+              <li data-phase="settling"><span>3</span><strong>Asentar</strong><small>Idle + mensaje</small></li>
+              <li data-phase="continuing"><span>4</span><strong>Evaluar</strong><small>Fin o continuar</small></li>
+            </ol>
+            <div class="event-message" role="status" aria-live="polite">
+              <span class="event-pulse" aria-hidden="true"></span>
+              <span id="last-event">Esperando actividad.</span>
+            </div>
+          </section>
+
+          <section class="content-grid">
+            <div class="content-card">
+              <header class="section-heading compact">
+                <span>
+                  <small class="eyebrow">Última respuesta</small>
+                  <h2>Salida del agente</h2>
+                </span>
+              </header>
+              <pre class="agent-output" id="last-message">Aún no hay una respuesta completada.</pre>
+            </div>
+            <div class="content-card">
+              <header class="section-heading compact">
+                <span>
+                  <small class="eyebrow">Terminación</small>
+                  <h2>Motivo actual</h2>
+                </span>
+              </header>
+              <p class="reason" id="run-reason">La ejecución todavía está activa.</p>
+              <dl class="compact-list">
+                <div><dt>Sentinel</dt><dd id="run-sentinel">—</dd></div>
+                <div><dt>Todos</dt><dd id="run-todos">—</dd></div>
+                <div><dt>Permisos</dt><dd id="run-permissions">—</dd></div>
+              </dl>
+            </div>
+          </section>
+        </article>
+      </main>
+
+      <aside class="inspector" aria-label="Inspector">
+        <div class="tabs" role="tablist" aria-label="Panel del inspector">
+          <button class="tab is-active" id="inspector-tab" type="button" role="tab" aria-selected="true" aria-controls="inspector-panel">Inspector</button>
+          <button class="tab" id="logs-tab" type="button" role="tab" aria-selected="false" aria-controls="logs-panel">Registro <span id="log-count">0</span></button>
+        </div>
+
+        <section class="tab-panel" id="inspector-panel" role="tabpanel" aria-labelledby="inspector-tab">
+          <div class="inspector-block">
+            <div class="inspector-title">
+              <span class="eyebrow">Conectividad</span>
+              <button class="text-button" id="inspector-doctor-button" type="button">Comprobar</button>
+            </div>
+            <dl class="inspector-list">
+              <div><dt>Motor</dt><dd id="inspect-engine">Sin comprobar</dd></div>
+              <div><dt>Modo</dt><dd id="inspect-mode">—</dd></div>
+              <div><dt>Endpoint</dt><dd id="inspect-endpoint">—</dd></div>
+              <div><dt>Versión</dt><dd id="inspect-version">—</dd></div>
+            </dl>
+            <ul class="warning-list" id="doctor-warnings"></ul>
+          </div>
+
+          <div class="inspector-block">
+            <span class="eyebrow">Ejecución seleccionada</span>
+            <dl class="inspector-list spaced">
+              <div><dt>Run ID</dt><dd id="inspect-run-id">—</dd></div>
+              <div><dt>Sesión</dt><dd id="inspect-session">—</dd></div>
+              <div><dt>Workspace</dt><dd id="inspect-workspace">—</dd></div>
+              <div><dt>Modelo</dt><dd id="inspect-model">Predeterminado</dd></div>
+              <div><dt>Agente</dt><dd id="inspect-agent">Predeterminado</dd></div>
+              <div><dt>Límite</dt><dd id="inspect-limit">—</dd></div>
+            </dl>
+          </div>
+
+          <div class="inspector-note">
+            <strong>Sin temporizador de envío</strong>
+            <p>El watchdog solo detecta falta de actividad. La continuación depende del estado real de la sesión.</p>
+          </div>
+        </section>
+
+        <section class="tab-panel logs-panel" id="logs-panel" role="tabpanel" aria-labelledby="logs-tab" hidden>
+          <div class="log-toolbar">
+            <span>Eventos locales</span>
+            <button class="text-button" id="clear-logs-button" type="button">Limpiar</button>
+          </div>
+          <ol class="log-list" id="log-list" role="log" aria-live="polite" aria-relevant="additions"></ol>
+          <p class="logs-empty" id="logs-empty">Los eventos aparecerán aquí.</p>
+        </section>
+      </aside>
+    </div>
+
+    <dialog class="run-dialog" id="run-dialog" aria-labelledby="dialog-title" aria-describedby="dialog-description">
+      <form id="run-form" method="dialog">
+        <header class="dialog-header">
+          <span>
+            <small class="eyebrow">OpenCode Desktop</small>
+            <h2 id="dialog-title">Nueva ejecución</h2>
+            <p id="dialog-description">Define la tarea y los límites del supervisor local.</p>
+          </span>
+          <button class="icon-button" id="dialog-close-button" type="button" aria-label="Cerrar">×</button>
+        </header>
+
+        <div class="dialog-body">
+          <label class="field field--full">
+            <span>Tarea</span>
+            <textarea id="task-input" name="task" rows="5" maxlength="8000" required placeholder="Describe un resultado comprobable y cuándo debe considerarse terminado."></textarea>
+            <small><span>Se enviará a OpenCode.</span><span id="task-count">0 / 8000</span></small>
+          </label>
+
+          <div class="field-grid">
+            <label class="field field--wide">
+              <span>Workspace</span>
+              <span class="picker">
+                <input id="workspace-input" name="workspace" type="text" maxlength="32767" required spellcheck="false" placeholder="Ruta absoluta del proyecto">
+                <button class="button button--secondary" id="workspace-picker-button" type="button">Elegir…</button>
+              </span>
+            </label>
+            <label class="field">
+              <span>Nombre</span>
+              <input id="name-input" name="name" type="text" maxlength="128" autocomplete="off" placeholder="Automático">
+            </label>
+          </div>
+
+          <div class="limits-grid">
+            <label class="field"><span>Iteraciones</span><input id="max-iterations-input" type="number" min="1" max="10000" step="1" value="100" required></label>
+            <label class="field"><span>Máximo horas</span><input id="max-hours-input" type="number" min="0.05" max="720" step="0.05" value="8" required></label>
+            <label class="field"><span>Inactividad min</span><input id="stall-minutes-input" type="number" min="1" max="1440" step="1" value="20" required></label>
+            <label class="field"><span>Sentinel</span><input id="sentinel-input" type="text" maxlength="256" value="[TASK_COMPLETE]" required spellcheck="false"></label>
+          </div>
+
+          <details class="advanced" id="advanced-settings">
+            <summary>Conexión y opciones avanzadas</summary>
+            <div class="advanced-body">
+              <div class="field-grid">
+                <label class="field"><span>Sesión o deeplink</span><input id="session-input" type="text" maxlength="2048" spellcheck="false" placeholder="ses_… u oc://…"></label>
+                <label class="field"><span>Servidor local</span><input id="attach-input" type="url" maxlength="2048" spellcheck="false" placeholder="http://127.0.0.1:4096"></label>
+                <label class="field"><span>Modelo</span><input id="model-input" type="text" maxlength="512" spellcheck="false" placeholder="proveedor/modelo"></label>
+                <label class="field"><span>Agente</span><input id="agent-input" type="text" maxlength="256" spellcheck="false" placeholder="Predeterminado"></label>
+                <label class="field field--wide">
+                  <span>Binario OpenCode</span>
+                  <span class="picker">
+                    <input id="binary-input" type="text" maxlength="32767" spellcheck="false" placeholder="Detección automática">
+                    <button class="button button--secondary" id="binary-picker-button" type="button">Elegir…</button>
+                  </span>
+                </label>
+              </div>
+
+              <fieldset class="options">
+                <legend>Política del ciclo</legend>
+                <label class="check-row"><input id="todos-input" type="checkbox" checked><span><strong>Validar todos</strong><small>Finaliza si toda la lista está completada.</small></span></label>
+                <label class="check-row check-row--danger"><input id="auto-approve-input" type="checkbox"><span><strong>Autoaprobar permisos de esta sesión</strong><small>Nunca se aplica a otras sesiones del sidecar.</small></span></label>
+                <label class="danger-confirmation" id="auto-approve-confirmation-row" hidden>
+                  <input id="auto-approve-confirmation-input" type="checkbox">
+                  <span>Entiendo que esta ejecución podrá modificar archivos y ejecutar herramientas sin confirmación individual.</span>
+                </label>
+              </fieldset>
+
+              <button class="doctor-inline" id="dialog-doctor-button" type="button">
+                <span class="signal signal--pending" id="dialog-doctor-signal" aria-hidden="true"></span>
+                <span><strong id="dialog-doctor-label">Comprobar conexión</strong><small id="dialog-doctor-detail">Valida workspace, binario y servidor local.</small></span>
+              </button>
+            </div>
+          </details>
+
+          <p class="form-error" id="form-error" role="alert" hidden></p>
+        </div>
+
+        <footer class="dialog-footer">
+          <span>Todo se ejecuta localmente.</span>
+          <span class="dialog-actions">
+            <button class="button button--secondary" id="dialog-cancel-button" type="button">Cancelar</button>
+            <button class="button button--primary" id="run-submit-button" type="submit">Iniciar supervisor</button>
+          </span>
+        </footer>
+      </form>
+    </dialog>
+
+    <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+    <div class="sr-only" id="live-region" aria-live="polite" aria-atomic="true"></div>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
