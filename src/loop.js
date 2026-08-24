@@ -99,10 +99,24 @@ async function exchange(req, sessionId, text, cfg, flag, monitor, log, { adoptRu
 
     const baselineIds = messageIds(before.messages);
     const unresolvedParents = unresolvedTurnParentIds(before.messages);
-    if (unresolvedParents.size > 1) {
-      throw new TurnCorrelationError('La sesion tiene multiples turnos sin resolver; se detuvo para evitar duplicados');
+    // turnos zombi: sin respuesta terminal y con horas de antiguedad son
+    // restos de corridas muertas (stalls/abortos); se excluyen del conteo
+    // para que la guarda no bloquee sesiones con historial contaminado
+    const ZOMBIE_MS = 2 * 60 * 60 * 1000;
+    const createdById = new Map(before.messages
+      .filter((m) => m && m.info && m.info.id)
+      .map((m) => [m.info.id, Number(m.info.time && m.info.time.created) || 0]));
+    const freshUnresolved = [...unresolvedParents].filter((id) => {
+      const created = createdById.get(id) || 0;
+      return !created || (Date.now() - created) < ZOMBIE_MS;
+    });
+    if (freshUnresolved.length < unresolvedParents.size) {
+      log.warn(`Ignorando ${unresolvedParents.size - freshUnresolved.length} turno(s) zombi sin resolver de corridas anteriores`);
     }
-    let parentId = unresolvedParents.size === 1 ? [...unresolvedParents][0] : null;
+    if (freshUnresolved.length > 1) {
+      throw new TurnCorrelationError('La sesion tiene multiples turnos recientes sin resolver; se detuvo para evitar duplicados');
+    }
+    let parentId = freshUnresolved.length === 1 ? freshUnresolved[0] : null;
     let staleBusyTerminal = null;
     if (isRunningStatus(before.status) && !parentId) {
       staleBusyTerminal = [...before.messages].reverse()
