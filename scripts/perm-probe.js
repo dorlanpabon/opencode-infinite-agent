@@ -25,7 +25,7 @@ const { resolveSession, initialPrompt } = require('../src/session');
     const ctl = new AbortController();
     const res = await fetch(base.replace(/\/$/, '') + '/event', {
       signal: ctl.signal,
-      headers: { accept: 'text/event-stream', ...server.authHeaders() },
+      headers: { accept: 'text/event-stream', ...server.authHeaders(base) },
     });
     if (!res.ok || !res.body) throw new Error(`SSE no disponible (${res.status})`);
     (async () => {

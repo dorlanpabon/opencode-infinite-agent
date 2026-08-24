@@ -16,7 +16,7 @@ async function resolveSession(req, { ref, title }) {
 
 function initialPrompt(task, sentinel) {
   return [
-    'You are working autonomously under an infinite-loop supervisor that will keep sending you continuation messages.',
+    'You are working autonomously under an event-driven supervisor. It sends one continuation only after OpenCode reports that the current turn has ended.',
     '',
     '# TASK',
     task,
@@ -28,7 +28,7 @@ function initialPrompt(task, sentinel) {
     '4. ONLY when EVERYTHING is fully complete and verified, end your final response with this exact marker on its own line:',
     sentinel,
     '',
-    'Do NOT output the marker until the task is truly 100% complete. The supervisor will send "continue" until it detects completion.',
+    'Do NOT output the marker until the task is truly 100% complete. After each terminal turn, the supervisor will verify completion before continuing.',
   ].join('\n');
 }
 

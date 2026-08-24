@@ -10,6 +10,9 @@ const DEFAULTS = {
   retryDelayMs: 4000,
   maxConsecutiveErrors: 4,
   stallTimeoutMin: 20,
+  turnHardTimeoutMin: 180,
+  errorGraceMs: 750,
+  eventConnectTimeoutMs: 15000,
   pollMs: 2000,
   sentinel: '[TASK_COMPLETE]',
   todoDetection: true,
@@ -60,6 +63,22 @@ function num(v, fallback) {
   return isNaN(n) ? fallback : n;
 }
 
+function normalizeLoopbackUrl(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error('--attach debe ser una URL http(s) loopback, ej: http://127.0.0.1:4096');
+  }
+  const host = url.hostname.toLowerCase();
+  const loopback = host === 'localhost' || host === '[::1]' || host === '::1' || /^127\./u.test(host);
+  if (!['http:', 'https:'].includes(url.protocol) || !loopback || url.username || url.password
+    || url.search || url.hash || (url.pathname !== '' && url.pathname !== '/')) {
+    throw new Error('--attach solo admite un origen HTTP(S) loopback sin credenciales, ruta, query ni fragmento');
+  }
+  return url.origin;
+}
+
 function loadConfig(args = {}) {
   const dir = args.dir ? path.resolve(args.dir) : null;
   const file = findConfigFile({ dir, cfgFile: args.config || null });
@@ -78,28 +97,41 @@ function loadConfig(args = {}) {
   if (args.retryDelayMs != null) cfg.retryDelayMs = num(args.retryDelayMs, cfg.retryDelayMs);
   if (args.maxConsecutiveErrors != null) cfg.maxConsecutiveErrors = num(args.maxConsecutiveErrors, cfg.maxConsecutiveErrors);
   if (args.stallTimeoutMin != null) cfg.stallTimeoutMin = num(args.stallTimeoutMin, cfg.stallTimeoutMin);
+  if (args.turnHardTimeoutMin != null) cfg.turnHardTimeoutMin = num(args.turnHardTimeoutMin, cfg.turnHardTimeoutMin);
+  if (args.errorGraceMs != null) cfg.errorGraceMs = num(args.errorGraceMs, cfg.errorGraceMs);
+  if (args.eventConnectTimeoutMs != null) cfg.eventConnectTimeoutMs = num(args.eventConnectTimeoutMs, cfg.eventConnectTimeoutMs);
   if (args.pollMs != null) cfg.pollMs = num(args.pollMs, cfg.pollMs);
   if (args.sentinel != null) cfg.sentinel = args.sentinel;
   if (args.model != null) cfg.model = args.model;
   if (args.agent != null) cfg.agent = args.agent;
   if (args.title != null) cfg.title = args.title;
-  if (args.attach != null) cfg.attach = args.attach;
+  if (args.attach != null) cfg.attach = normalizeLoopbackUrl(args.attach);
   if (args.noTodos) cfg.todoDetection = false;
   if (args.autoApprove) cfg.autoApprove = true;
   if (args.noDiscover) cfg.discover = false;
   if (args.keepServer) cfg.keepServer = true;
   if (args.verbose) cfg.verbose = true;
 
+  cfg.errorGraceMs = num(cfg.errorGraceMs, DEFAULTS.errorGraceMs);
+  cfg.eventConnectTimeoutMs = num(cfg.eventConnectTimeoutMs, DEFAULTS.eventConnectTimeoutMs);
+  cfg.turnHardTimeoutMin = num(cfg.turnHardTimeoutMin, DEFAULTS.turnHardTimeoutMin);
   cfg.stallTimeoutMs = cfg.stallTimeoutMin * 60 * 1000;
+  cfg.turnHardTimeoutMs = cfg.turnHardTimeoutMin * 60 * 1000;
   cfg.base = `http://${cfg.hostname}:${cfg.port}`;
   cfg.configFileUsed = file;
 
   if (!cfg.sentinel || typeof cfg.sentinel !== 'string') throw new Error('sentinel invalido en configuracion');
   if (cfg.maxIterations < 1) throw new Error('maxIterations debe ser >= 1');
   if (cfg.delayMs < 0) throw new Error('delayMs no puede ser negativo');
-  if (cfg.attach && !/^https?:\/\//i.test(cfg.attach)) throw new Error('--attach debe ser una URL http(s), ej: http://127.0.0.1:4096');
+  if (cfg.errorGraceMs < 0) throw new Error('errorGraceMs no puede ser negativo');
+  if (cfg.eventConnectTimeoutMs < 1) throw new Error('eventConnectTimeoutMs debe ser >= 1');
+  if (cfg.turnHardTimeoutMin < 1) throw new Error('turnHardTimeoutMin debe ser >= 1');
+  if (cfg.hostname !== '127.0.0.1' && cfg.hostname !== 'localhost') {
+    throw new Error('hostname debe ser 127.0.0.1 o localhost; el servidor administrado no se expone a la red');
+  }
+  if (cfg.attach) cfg.attach = normalizeLoopbackUrl(cfg.attach);
 
   return cfg;
 }
 
-module.exports = { DEFAULTS, loadConfig };
+module.exports = { DEFAULTS, loadConfig, normalizeLoopbackUrl };

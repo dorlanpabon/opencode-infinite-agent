@@ -1,18 +1,29 @@
 const { assistantText, hasSentinel, todosDone, excerpt, messageError, usageOf } = require('./detect');
 const { continuationPrompt } = require('./session');
+const {
+  createSessionTurnMonitor,
+  terminalMessageIds,
+  TurnMonitorTimeout,
+  SessionTurnError,
+  TurnMonitorAborted,
+} = require('./turn-monitor');
 
 class LoopAborted extends Error {
   constructor() { super('Interrumpido por el usuario (Ctrl+C)'); }
 }
 class LoopStalled extends Error {}
 
-// sleep que se despierta antes si flag.aborted
+// Backoff abortable usado solo para fallos confirmados de transporte/HTTP.
 function sleepAbortable(ms, flag) {
   return new Promise((resolve) => {
     if (ms <= 0 || flag.aborted) return resolve();
     const timer = setTimeout(done, ms);
-    const poll = setInterval(() => { if (flag.aborted) done(); }, 200);
-    function done() { clearTimeout(timer); clearInterval(poll); resolve(); }
+    if (flag.signal) flag.signal.addEventListener('abort', done, { once: true });
+    function done() {
+      clearTimeout(timer);
+      if (flag.signal) flag.signal.removeEventListener('abort', done);
+      resolve();
+    }
   });
 }
 
@@ -30,45 +41,74 @@ function buildMessageBody(cfg, text) {
   return body;
 }
 
-// envia un mensaje asincrono y espera la respuesta nueva del assistant
-async function exchange(req, sessionId, text, cfg, flag) {
-  const before = await req('GET', `/session/${sessionId}/message`);
-  const known = new Set((Array.isArray(before) ? before : []).map((m) => m.info && m.info.id).filter(Boolean));
+function isRunningStatus(status) {
+  return status && (status.type === 'busy' || status.type === 'retry');
+}
 
-  // envio asincrono evita timeouts HTTP en turnos largos del agente
-  await req('POST', `/session/${sessionId}/prompt_async`, buildMessageBody(cfg, text), { timeoutMs: 15000 });
-
-  const deadline = Date.now() + cfg.stallTimeoutMs;
-  const hardDeadline = Date.now() + 3 * 60 * 60 * 1000;
-  while (Date.now() < deadline) {
-    if (flag.aborted) throw new LoopAborted();
-    await sleepAbortable(cfg.pollMs, flag);
-    if (flag.aborted) throw new LoopAborted();
-    const msgs = await req('GET', `/session/${sessionId}/message`);
-    const reply = (Array.isArray(msgs) ? msgs : []).find((m) =>
-      m && m.info && !known.has(m.info.id) &&
-      m.info.role === 'assistant' &&
-      ((m.info.time && m.info.time.completed) || m.info.error)
-    );
-    if (reply) return reply;
-    // si la sesion sigue BUSY el turno legitimo sigue corriendo (ej: render
-    // largo en AWS): extender la espera en vez de declarar stall
-    try {
-      const st = await req('GET', '/session/status', null, { timeoutMs: 10000 });
-      const info = st && (st[sessionId] || st);
-      const busy = Boolean(info) && JSON.stringify(info).toLowerCase().includes('busy');
-      if (busy && Date.now() < hardDeadline) {
-        if (log.isVerbose()) log.debug('sesion busy: extendiendo espera del turno');
-        deadline = Date.now() + cfg.stallTimeoutMs;
-      }
-    } catch {}
+// Arma el monitor antes de prompt_async. Los eventos solo despiertan una
+// reconciliacion; el siguiente prompt requiere assistant terminal persistido e idle.
+async function exchange(req, sessionId, text, cfg, flag, monitor, log) {
+  if (flag.aborted) throw new LoopAborted();
+  await monitor.ready(cfg.eventConnectTimeoutMs);
+  if (flag.aborted) throw new LoopAborted();
+  const before = await monitor.snapshot();
+  const known = terminalMessageIds(before.messages);
+  if (isRunningStatus(before.status)) {
+    const last = before.messages[before.messages.length - 1];
+    if (last && last.info && last.info.role === 'assistant' &&
+      ((last.info.time && last.info.time.completed) || last.info.error)) {
+      // Puede ser el conocido desfase stale-busy de OpenCode: permitir que el
+      // idle posterior cierre este terminal ya persistido.
+      known.delete(last.info.id);
+    }
   }
-  try { await req('POST', `/session/${sessionId}/abort`, {}); } catch {}
-  throw new LoopStalled(`Sin respuesta del agente tras ${cfg.stallTimeoutMin} min. Causa probable: dialogo de permiso pendiente. Soluciones: --auto-approve o ejecutar antes "loop-agent init-permissions --dir <proyecto>"`);
+  const ticket = monitor.waitForTerminal({
+    knownMessageIds: known,
+    timeoutMs: cfg.stallTimeoutMs,
+    hardTimeoutMs: cfg.turnHardTimeoutMs,
+    signal: flag.signal,
+  });
+
+  // Al reanudar una sesion que aun trabaja, no inyectar otro mensaje. Esperar
+  // el terminal del turno existente y evaluarlo primero.
+  if (isRunningStatus(before.status)) {
+    log.info(`Sesion ${before.status.type}: esperando que termine el turno activo`);
+    void ticket.reconcile().catch((error) => log.debug(`Reconciliacion: ${error.message}`));
+    try {
+      return await ticket.promise;
+    } catch (error) {
+      if (error instanceof TurnMonitorAborted || flag.aborted) throw new LoopAborted();
+      if (error instanceof TurnMonitorTimeout) throw new LoopStalled(error.message);
+      throw error;
+    }
+  }
+
+  try {
+    // prompt_async evita mantener una respuesta HTTP abierta durante horas.
+    await req('POST', `/session/${sessionId}/prompt_async`, buildMessageBody(cfg, text), { timeoutMs: 15000 });
+  } catch (error) {
+    // Un HTTP no exitoso confirma rechazo. Un timeout/error de transporte es
+    // ambiguo: el servidor pudo aceptar el prompt; esperar evidencia evita duplicarlo.
+    if (error && error.status) {
+      ticket.cancel(error);
+      try { await ticket.promise; } catch {}
+      throw error;
+    }
+    log.warn(`Resultado ambiguo al enviar prompt; reconciliando sin reenviar: ${error.message}`);
+  }
+
+  void ticket.reconcile().catch((error) => log.debug(`Reconciliacion: ${error.message}`));
+  try {
+    return await ticket.promise;
+  } catch (error) {
+    if (error instanceof TurnMonitorAborted || flag.aborted) throw new LoopAborted();
+    if (error instanceof TurnMonitorTimeout) throw new LoopStalled(error.message);
+    throw error;
+  }
 }
 
 // motor principal: itera hasta sentinel / todos completos / limites
-async function runLoop({ req, sessionId, cfg, firstPrompt, flag, log }) {
+async function runLoop({ req, sessionId, cfg, firstPrompt, flag, log, eventStream, onState }) {
   const state = {
     startedAt: Date.now(),
     iterations: 0,
@@ -80,6 +120,13 @@ async function runLoop({ req, sessionId, cfg, firstPrompt, flag, log }) {
   let status = 'max-iterations';
   let reason = `Se alcanzo el limite de iteraciones (${cfg.maxIterations})`;
   let consecutiveErrors = 0;
+  const monitor = createSessionTurnMonitor({
+    req,
+    eventStream,
+    sessionId,
+    errorGraceMs: cfg.errorGraceMs,
+    log,
+  });
 
   log.banner(`LOOP INFINITO INICIADO | sesion ${sessionId} | max ${cfg.maxIterations} iteraciones`);
 
@@ -88,6 +135,7 @@ async function runLoop({ req, sessionId, cfg, firstPrompt, flag, log }) {
       if (flag.aborted) { status = 'aborted'; reason = 'Interrumpido por el usuario'; break; }
 
       log.banner(`--- Iteracion ${i}/${cfg.maxIterations} ---`);
+      if (onState) onState({ type: 'phase', phase: i === 1 ? 'working' : 'continuing', iteration: i });
       const prompt = i === 1 ? firstPrompt : continuationPrompt(cfg.sentinel);
 
       // intentos con reintentos ante fallos transitorios
@@ -96,15 +144,17 @@ async function runLoop({ req, sessionId, cfg, firstPrompt, flag, log }) {
       while (!reply && attempt <= cfg.retries) {
         attempt++;
         try {
-          reply = await exchange(req, sessionId, prompt, cfg, flag);
+          reply = await exchange(req, sessionId, prompt, cfg, flag, monitor, log);
           consecutiveErrors = 0;
         } catch (e) {
           if (e instanceof LoopAborted || flag.aborted) throw new LoopAborted();
           consecutiveErrors++;
           log.warn(`Fallo en el intercambio (intento ${attempt}/${cfg.retries + 1}, consecutivos: ${consecutiveErrors}): ${e.message}`);
-          if (consecutiveErrors >= cfg.maxConsecutiveErrors) {
+          if (e instanceof LoopStalled || e instanceof SessionTurnError || consecutiveErrors >= cfg.maxConsecutiveErrors) {
             status = 'error';
-            reason = `${consecutiveErrors} fallos consecutivos. Ultimo: ${e.message}`;
+            reason = e instanceof LoopStalled || e instanceof SessionTurnError
+              ? e.message
+              : `${consecutiveErrors} fallos consecutivos. Ultimo: ${e.message}`;
             break;
           }
           await sleepAbortable(cfg.retryDelayMs, flag);
@@ -125,6 +175,16 @@ async function runLoop({ req, sessionId, cfg, firstPrompt, flag, log }) {
 
       const text = assistantText(reply.parts);
       state.lastText = text;
+      if (onState) {
+        onState({
+          type: 'settling',
+          phase: 'settling',
+          iteration: i,
+          tokens: { ...state.tokens },
+          cost: state.cost,
+          lastText: text,
+        });
+      }
 
       const agentErr = messageError(reply.info);
       if (agentErr) {
@@ -166,8 +226,6 @@ async function runLoop({ req, sessionId, cfg, firstPrompt, flag, log }) {
           }
         }
       }
-
-      if (i < cfg.maxIterations) await sleepAbortable(cfg.delayMs, flag);
     }
   } catch (e) {
     if (e instanceof LoopAborted || flag.aborted) {
@@ -177,6 +235,8 @@ async function runLoop({ req, sessionId, cfg, firstPrompt, flag, log }) {
       status = 'error';
       reason = e.message;
     }
+  } finally {
+    monitor.close();
   }
 
   return { status, reason, state };

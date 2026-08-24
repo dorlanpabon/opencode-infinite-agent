@@ -3,9 +3,24 @@ const os = require('os');
 const path = require('path');
 const { execSync, spawn } = require('child_process');
 
-function authHeaders() {
+function authHeaders(base) {
+  if (!base) throw new Error('authHeaders requiere el origen base');
   const pass = process.env.OPENCODE_SERVER_PASSWORD;
   if (!pass) return {};
+  let origin;
+  try {
+    origin = new URL(base);
+  } catch {
+    throw new Error(`Origen OpenCode invalido: ${base}`);
+  }
+  if (origin.protocol !== 'http:' && origin.protocol !== 'https:') {
+    throw new Error(`Protocolo OpenCode no permitido: ${origin.protocol}`);
+  }
+  const host = origin.hostname.toLowerCase();
+  const loopback = host === 'localhost' || host === '[::1]' || host === '::1' || /^127\./u.test(host);
+  if (!loopback) {
+    throw new Error(`Se rechazo enviar OPENCODE_SERVER_PASSWORD fuera de loopback: ${origin.origin}`);
+  }
   const user = process.env.OPENCODE_SERVER_USERNAME || 'opencode';
   return { Authorization: 'Basic ' + Buffer.from(`${user}:${pass}`).toString('base64') };
 }
@@ -17,7 +32,7 @@ async function request(base, method, pathName, body, { timeoutMs = 30000 } = {})
   try {
     const res = await fetch(url, {
       method,
-      headers: { 'content-type': 'application/json', ...authHeaders() },
+      headers: { 'content-type': 'application/json', ...authHeaders(base) },
       body: body != null ? JSON.stringify(body) : undefined,
       signal: ctl.signal,
     });
@@ -91,7 +106,9 @@ function findBinary(explicit) {
   const posixCandidates = [
     '/usr/local/bin/opencode',
     '/usr/bin/opencode',
+    '/opt/homebrew/bin/opencode',
     path.join(home, '.local', 'bin', 'opencode'),
+    path.join(home, '.opencode', 'bin', 'opencode'),
     path.join(home, '.bun', 'bin', 'opencode'),
   ];
   for (const c of process.platform === 'win32' ? winCandidates : posixCandidates) {
@@ -124,12 +141,22 @@ function spawnServe(bin, cfg, extraEnv) {
 // crea un directorio con configuracion minima vacia para aislar al servidor
 // de un config global del usuario que la version instalada no entienda
 function isolatedConfigDir() {
-  const dir = path.join(os.tmpdir(), 'loop-agent-config-iso');
-  const sub = path.join(dir, 'opencode');
-  fs.mkdirSync(sub, { recursive: true });
-  const file = path.join(sub, 'opencode.json');
-  if (!fs.existsSync(file)) fs.writeFileSync(file, '{}\n');
-  return dir;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opencode-infinite-config-'));
+  try {
+    if (process.platform !== 'win32') fs.chmodSync(dir, 0o700);
+    const sub = path.join(dir, 'opencode');
+    fs.mkdirSync(sub, { mode: 0o700 });
+    fs.writeFileSync(path.join(sub, 'opencode.json'), '{}\n', { mode: 0o600 });
+    return dir;
+  } catch (error) {
+    removeIsolatedConfigDir(dir);
+    throw error;
+  }
+}
+
+function removeIsolatedConfigDir(dir) {
+  if (!dir || path.dirname(dir) !== os.tmpdir() || !path.basename(dir).startsWith('opencode-infinite-config-')) return;
+  fs.rmSync(dir, { recursive: true, force: true });
 }
 
 function killTree(proc) {
@@ -206,7 +233,7 @@ async function ensureServer(cfg, log) {
   const bin = findBinary(cfg.opencodeBin);
   log.info(`Iniciando servidor headless: ${bin} serve --port ${cfg.port}`);
 
-  const attempts = [{ env: null }];
+  const attempts = [{ env: null, isolatedDir: null }];
   let retriedIsolated = false;
 
   for (const attempt of attempts) {
@@ -221,18 +248,21 @@ async function ensureServer(cfg, log) {
         if (retriedIsolated) {
           log.warn('Se aisló la configuración (XDG_CONFIG_HOME temporal) porque el config global no es compatible con esta versión de opencode. MCPs y ajustes del config global NO se cargaron en este servidor.');
         }
-        return { base: cfg.base, owned: true, proc };
+        if (attempt.isolatedDir) proc.once('exit', () => removeIsolatedConfigDir(attempt.isolatedDir));
+        return { base: cfg.base, owned: true, proc, isolatedDir: attempt.isolatedDir };
       }
       await new Promise((r) => setTimeout(r, 700));
     }
 
     const errTail = getStderr();
     await killTree(proc);
+    if (attempt.isolatedDir) removeIsolatedConfigDir(attempt.isolatedDir);
 
     // config global incompatible → reintento con config aislada
     if (!started && proc.exitCode !== null && /Configuration is invalid/i.test(errTail) && !retriedIsolated) {
       log.warn('El config global de opencode es invalido para esta version del CLI. Reintentando con configuracion aislada...');
-      attempts.push({ env: { XDG_CONFIG_HOME: isolatedConfigDir() } });
+      const isolatedDir = isolatedConfigDir();
+      attempts.push({ env: { XDG_CONFIG_HOME: isolatedDir }, isolatedDir });
       retriedIsolated = true;
       continue;
     }
@@ -247,83 +277,214 @@ async function stopServer(handle) {
   await killTree(handle.proc);
 }
 
-// escucha el stream /event y responde automaticamente las peticiones de permiso
-// filtro amplio: cualquier evento /permission/i con id pendiente se responde
-// (cubre permission.asked, permission.updated, variantes v2 segun version)
-// respuesta: endpoint nuevo POST /permission/:id/reply {reply} con fallback al
-// viejo POST /session/:id/permissions/:pid {response}
-// reconexion automatica: el stream puede caer en corridas de horas
-function startEventListener({ base, sessionId, onResponseSent, debug, reply = 'once' }) {
-  const ctl = new AbortController();
+function unwrapEvent(value) {
+  if (!value || typeof value !== 'object') return null;
+  if (value.payload && typeof value.payload === 'object' && value.payload.type) return value.payload;
+  return value.type ? value : null;
+}
 
-  async function processEvent(ev) {
-    const type = String(ev.type || ev.name || '');
-    if (!/permission/i.test(type)) return;
-    const payload = ev.properties || ev.data || ev.payload || ev.attributes || {};
-    const pid = payload.id || payload.permissionID;
-    const sid = payload.sessionID || sessionId;
-    if (!pid || !sid) return;
-    let via = null;
+function parseSseFrames(buffer, onEvent) {
+  const normalized = buffer.replace(/\r\n/g, '\n');
+  let start = 0;
+  let end;
+  while ((end = normalized.indexOf('\n\n', start)) >= 0) {
+    const frame = normalized.slice(start, end);
+    start = end + 2;
+    const data = frame.split('\n')
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trimStart())
+      .join('\n');
+    if (!data) continue;
     try {
-      await request(base, 'POST', `/permission/${pid}/reply`, { reply }, { timeoutMs: 10000 });
-      via = 'nuevo';
+      const event = unwrapEvent(JSON.parse(data));
+      if (event) onEvent(event);
     } catch {}
-    if (!via) {
-      try {
-        await request(base, 'POST', `/session/${sid}/permissions/${pid}`, { response: reply }, { timeoutMs: 10000 });
-        via = 'legado';
-      } catch {}
+  }
+  return normalized.slice(start);
+}
+
+function abortableDelay(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal.aborted || ms <= 0) return resolve();
+    const timer = setTimeout(done, ms);
+    signal.addEventListener('abort', done, { once: true });
+    function done() {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
     }
-    if (onResponseSent && via) {
-      onResponseSent(sid, pid, payload.permission || type, via);
-    } else if (debug) {
-      debug(`permiso ${pid} (${type}): sin respuesta exitosa`);
+  });
+}
+
+// Conexion SSE compartida. Los consumidores se suscriben antes del POST para
+// no perder la transicion terminal; cada reconexion vuelve a emitir
+// server.connected y permite reconciliar desde la API persistida.
+function startEventStream({
+  base,
+  debug,
+  fetchImpl = fetch,
+  reconnectMinMs = 3000,
+  reconnectMaxMs = 15000,
+}) {
+  const ctl = new AbortController();
+  const listeners = new Set();
+  const connectionWaiters = new Set();
+  let readyResolve;
+  const ready = new Promise((resolve) => { readyResolve = resolve; });
+  let readyDone = false;
+  let connected = false;
+
+  function publish(event) {
+    for (const listener of [...listeners]) {
+      try {
+        const result = listener(event);
+        if (result && typeof result.catch === 'function') {
+          result.catch((error) => { if (debug) debug(`consumidor SSE: ${error.message}`); });
+        }
+      } catch (error) {
+        if (debug) debug(`consumidor SSE: ${error.message}`);
+      }
     }
   }
 
+  function markConnected() {
+    connected = true;
+    if (!readyDone) {
+      readyDone = true;
+      readyResolve();
+    }
+    for (const waiter of [...connectionWaiters]) waiter.resolve();
+    connectionWaiters.clear();
+    // Read-repair inmediato incluso si una version no entrega server.connected.
+    publish({ type: 'server.connected', properties: { transport: true } });
+  }
+
+  function markDisconnected() {
+    connected = false;
+  }
+
   (async () => {
-    let backoff = 3000;
-    for (;;) {
-      if (ctl.signal.aborted) return;
+    let backoff = reconnectMinMs;
+    while (!ctl.signal.aborted) {
       try {
-        const res = await fetch(base.replace(/\/$/, '') + '/event', {
-          headers: { accept: 'text/event-stream', ...authHeaders() },
+        const res = await fetchImpl(base.replace(/\/$/, '') + '/event', {
+          headers: { accept: 'text/event-stream', ...authHeaders(base) },
           signal: ctl.signal,
         });
         if (!res.ok || !res.body) {
           if (debug) debug(`SSE /event respondio ${res.status}; reintentando...`);
         } else {
-          backoff = 3000;
+          backoff = reconnectMinMs;
+          markConnected();
           const reader = res.body.getReader();
           const decoder = new TextDecoder();
-          let buf = '';
+          let buffer = '';
           for (;;) {
             const { done, value } = await reader.read();
             if (done) break;
-            buf += decoder.decode(value, { stream: true });
-            let idx;
-            while ((idx = buf.indexOf('\n')) >= 0) {
-              const line = buf.slice(0, idx).trim();
-              buf = buf.slice(idx + 1);
-              if (!line.startsWith('data:')) continue;
-              try {
-                await processEvent(JSON.parse(line.slice(5).trim()));
-              } catch (e) {
-                if (debug) debug(`evento SSE no procesado: ${e.message}`);
-              }
-            }
+            buffer += decoder.decode(value, { stream: true });
+            buffer = parseSseFrames(buffer, publish);
           }
-          if (debug) debug('SSE terminado; reconectando...');
+          markDisconnected();
+          if (buffer.trim()) parseSseFrames(buffer + '\n\n', publish);
+          if (debug && !ctl.signal.aborted) debug('SSE terminado; reconectando...');
         }
-      } catch (e) {
-        if (ctl.signal.aborted) return;
-        if (debug) debug(`SSE error: ${e.message}; reconectando...`);
+      } catch (error) {
+        markDisconnected();
+        if (ctl.signal.aborted) break;
+        if (debug) debug(`SSE error: ${error.message}; reconectando...`);
       }
-      await new Promise((r) => setTimeout(r, backoff));
-      backoff = Math.min(backoff * 2, 15000);
+      await abortableDelay(backoff, ctl.signal);
+      backoff = Math.min(backoff * 2, reconnectMaxMs);
     }
   })();
-  return ctl;
+
+  return {
+    ready,
+    signal: ctl.signal,
+    get connected() { return connected; },
+    waitUntilConnected() {
+      if (connected) return Promise.resolve();
+      if (ctl.signal.aborted) return Promise.reject(new Error('SSE abortado'));
+      return new Promise((resolve, reject) => connectionWaiters.add({ resolve, reject }));
+    },
+    subscribe(listener) {
+      if (typeof listener !== 'function') throw new Error('listener SSE invalido');
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    abort() {
+      ctl.abort();
+      markDisconnected();
+      for (const waiter of [...connectionWaiters]) waiter.reject(new Error('SSE abortado'));
+      connectionWaiters.clear();
+      listeners.clear();
+    },
+  };
 }
 
-module.exports = { request, health, findBinary, ensureServer, stopServer, startEventListener, authHeaders };
+// Auto-aprueba exclusivamente permission.asked de la sesion supervisada.
+// No responde permission.updated/replied ni eventos v2 con otro contrato.
+function startPermissionApprover({
+  base,
+  eventStream,
+  sessionId,
+  onResponseSent,
+  debug,
+  reply = 'once',
+  requestFn = request,
+}) {
+  if (!eventStream || typeof eventStream.subscribe !== 'function') {
+    throw new Error('Auto-approve requiere eventStream');
+  }
+  if (!sessionId) throw new Error('Auto-approve requiere sessionId');
+  const handled = new Set();
+  const inFlight = new Set();
+
+  const unsubscribe = eventStream.subscribe(async (raw) => {
+    const event = unwrapEvent(raw);
+    if (!event || event.type !== 'permission.asked') return;
+    const payload = event.properties || event.data || {};
+    const sid = payload.sessionID || payload.sessionId;
+    const pid = payload.id || payload.requestID;
+    if (sid !== sessionId || !pid || handled.has(pid) || inFlight.has(pid)) return;
+
+    inFlight.add(pid);
+    let via = null;
+    try {
+      await requestFn(base, 'POST', `/permission/${pid}/reply`, { reply }, { timeoutMs: 10000 });
+      via = 'nuevo';
+    } catch {}
+    if (!via) {
+      try {
+        await requestFn(base, 'POST', `/session/${sid}/permissions/${pid}`, { response: reply }, { timeoutMs: 10000 });
+        via = 'legado';
+      } catch {}
+    }
+    inFlight.delete(pid);
+    if (via) {
+      handled.add(pid);
+      if (handled.size > 1000) handled.delete(handled.values().next().value);
+      if (onResponseSent) onResponseSent(sid, pid, payload.permission || 'permission.asked', via);
+    } else if (debug) {
+      debug(`permiso ${pid}: sin respuesta exitosa`);
+    }
+  });
+
+  return { abort: unsubscribe };
+}
+
+module.exports = {
+  request,
+  health,
+  findBinary,
+  ensureServer,
+  stopServer,
+  startEventStream,
+  startPermissionApprover,
+  authHeaders,
+  unwrapEvent,
+  parseSseFrames,
+  isolatedConfigDir,
+  removeIsolatedConfigDir,
+};

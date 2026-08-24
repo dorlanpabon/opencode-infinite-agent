@@ -18,12 +18,12 @@ USO:
   loop-agent --prompt "tarea..." [opciones]
   loop-agent --session ses_xxxxxxxx [opciones]
   loop-agent --deeplink "oc://renderer/server/.../session/ses_xxxxxxxx" [opciones]
-  loop-agent init-permissions [--dir <ruta>]     pre-autoriza permisos en el proyecto
+  loop-agent init-permissions --confirm-unsafe [--dir <ruta>]
 
 COMANDOS:
   init-permissions    Crea/fusiona opencode.json en --dir (o cwd) con permisos
                       allow-all: edit, bash, webfetch y external_directory.
-                      Evita TODOS los dialogos "Permission required" del proyecto.
+                      Requiere --confirm-unsafe porque elimina barreras del proyecto.
 
 MODOS:
   --prompt <texto>       Tarea nueva (crea sesion). Obligatoria si no hay session/deeplink.
@@ -39,7 +39,7 @@ OPCIONES PRINCIPALES:
 
 LIMITES Y SEGURIDAD:
   --max-iterations <n>   Maximo de iteraciones del bucle (default: 100)
-  --delay-ms <ms>        Pausa entre iteraciones (default: 4000)
+  --delay-ms <ms>        Compatibilidad: ignorado; la continuación depende de eventos
   --retries <n>          Reintentos por iteracion ante fallos transitorios (default: 3)
   --stall-timeout-min <m> Tiempo maximo esperando respuesta por iteracion (default: 20)
   --sentinel <marcador>  Marcador de finalizacion (default: "[TASK_COMPLETE]")
@@ -102,9 +102,15 @@ function normalizeKeys(args) {
 // pre-autoriza permisos en el proyecto para evitar dialogos "Permission required"
 function runInitPermissions(argv) {
   let dir = process.cwd();
+  let confirmed = false;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--dir' && argv[i + 1]) { dir = path.resolve(argv[++i]); }
-    if (argv[i] === '-h' || argv[i] === '--help') { console.log('Uso: loop-agent init-permissions [--dir <ruta>]'); process.exit(0); }
+    if (argv[i] === '--confirm-unsafe') confirmed = true;
+    if (argv[i] === '-h' || argv[i] === '--help') { console.log('Uso: loop-agent init-permissions --confirm-unsafe [--dir <ruta>]'); process.exit(0); }
+  }
+  if (!confirmed) {
+    log.err('init-permissions habilita bash y acceso externo sin confirmación. Repite con --confirm-unsafe si aceptas ese riesgo.');
+    process.exit(1);
   }
   if (!fs.existsSync(dir)) {
     log.err(`El directorio no existe: ${dir}`);
@@ -180,6 +186,7 @@ async function main() {
   console.log(`Proyecto : ${args.dir ? path.resolve(args.dir) : process.cwd()}`);
   console.log(`Sentinel : ${cfg.sentinel}`);
   console.log(`Todos    : ${cfg.todoDetection ? 'activado' : 'desactivado'} | Auto-aprobar: ${cfg.autoApprove ? 'si' : 'no'}`);
+  console.log('Motor    : SSE event-driven (sin mensajes por intervalo)');
 
   // levanta o se adjunta al servidor headless
   let handle;
@@ -192,17 +199,6 @@ async function main() {
 
   const req = (method, p, body, opts) => server.request(handle.base, method, p, body, opts);
 
-  // listener SSE que auto-aprueba permisos cuando --auto-approve
-  let approverCtl = null;
-  if (cfg.autoApprove) {
-    approverCtl = server.startEventListener({
-      base: handle.base,
-      sessionId: null,
-      onResponseSent: (sid, pid) => log.warn(`Permiso auto-aprobado (${pid}) en sesion ${sid}`),
-      debug: log.debug,
-    });
-  }
-
   // resuelve o crea la sesion
   let session;
   try {
@@ -214,9 +210,25 @@ async function main() {
     log.ok(`${r.created ? 'Sesion creada' : 'Sesion reanudada'}: ${session.id}${session.title ? ` ("${session.title}")` : ''}`);
   } catch (e) {
     log.err(`Sesion: ${e.message}`);
-    if (approverCtl) approverCtl.abort();
     await server.stopServer(handle);
     process.exit(1);
+  }
+
+  // Un solo stream SSE compartido por el monitor de turno y auto-approve.
+  // Se inicia despues de resolver la sesion para filtrar permisos exactamente.
+  const eventStream = server.startEventStream({
+    base: handle.base,
+    debug: log.debug,
+  });
+  let approverCtl = null;
+  if (cfg.autoApprove) {
+    approverCtl = server.startPermissionApprover({
+      base: handle.base,
+      eventStream,
+      sessionId: session.id,
+      onResponseSent: (sid, pid) => log.warn(`Permiso auto-aprobado (${pid}) en sesion ${sid}`),
+      debug: log.debug,
+    });
   }
 
   // primer mensaje: tarea nueva con protocolo, o recordatorio de reanudacion
@@ -225,12 +237,14 @@ async function main() {
     : resumePrompt(cfg.sentinel);
 
   // Ctrl+C: aborta limpio la sesion y sale con codigo 130 tras el reporte
-  const flag = { aborted: false };
+  const abortCtl = new AbortController();
+  const flag = { aborted: false, signal: abortCtl.signal };
   let interrupts = 0;
   const onSignal = async () => {
     interrupts++;
     if (interrupts === 1) {
       flag.aborted = true;
+      abortCtl.abort();
       log.warn('Ctrl+C: abortando sesion y cerrando... (pulsa otra vez para forzar)');
       try { await req('POST', `/session/${session.id}/abort`, {}, { timeoutMs: 5000 }); } catch {}
     } else {
@@ -241,9 +255,10 @@ async function main() {
   if (process.platform === 'win32') process.on('SIGBREAK', onSignal);
 
   // ejecuta el bucle infinito
-  const result = await runLoop({ req, sessionId: session.id, cfg, firstPrompt, flag, log });
+  const result = await runLoop({ req, sessionId: session.id, cfg, firstPrompt, flag, log, eventStream });
 
   if (approverCtl) approverCtl.abort();
+  eventStream.abort();
   printReport({ status: result.status, reason: result.reason, state: result.state, sessionId: session.id, cfg }, log);
 
   if (!cfg.keepServer && handle.owned) {
