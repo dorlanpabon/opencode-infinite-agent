@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const { readFile } = require('node:fs/promises');
 const path = require('node:path');
 const test = require('node:test');
+const { hardenRpmSpec } = require('../scripts/prepare-linux-rpm-maker.cjs');
 
 const root = path.resolve(__dirname, '..');
 
@@ -37,4 +38,11 @@ test('paquete Electron usa allowlist y makers multiplataforma', () => {
   assert.ok(makers.some((maker) => maker.platforms?.includes('win32')));
   assert.ok(makers.some((maker) => maker.platforms?.includes('darwin')));
   assert.equal(makers.filter((maker) => maker.platforms?.includes('linux')).length, 2);
+});
+
+test('plantilla RPM fija chrome-sandbox a root y modo 4755', () => {
+  const source = '%files\n/usr/lib/<%= name %>/\n';
+  const hardened = hardenRpmSpec(source);
+  assert.match(hardened, /%attr\(4755, root, root\) \/usr\/lib\/<%= name %>\/chrome-sandbox/u);
+  assert.equal(hardenRpmSpec(hardened), hardened);
 });

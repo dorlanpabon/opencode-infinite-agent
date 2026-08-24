@@ -1,5 +1,6 @@
 const path = require('node:path');
 const { version } = require('./package.json');
+const { prepareLinuxRpmMaker } = require('./scripts/prepare-linux-rpm-maker.cjs');
 
 const homepage = 'https://github.com/dorlanpabon/opencode-infinite-agent';
 const description = 'Event-driven desktop supervisor for OpenCode sessions';
@@ -7,6 +8,9 @@ const iconBase = path.join(__dirname, 'assets', 'icon');
 const iconPng = `${iconBase}.png`;
 
 module.exports = {
+  hooks: {
+    preMake: prepareLinuxRpmMaker,
+  },
   packagerConfig: {
     asar: true,
     appBundleId: 'com.dorlanpabon.opencode-infinite',
