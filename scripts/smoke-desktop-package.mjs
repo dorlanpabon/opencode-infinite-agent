@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { access, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import os from 'node:os';
@@ -12,12 +12,12 @@ const require = createRequire(import.meta.url);
 const { packagerConfig } = require('../forge.config.cjs');
 const { executableName, name: packageName } = packagerConfig;
 const packageRoot = path.join(root, 'out', `${packageName}-${process.platform}-${process.arch}`);
-const executablePath = process.platform === 'win32'
+const defaultExecutablePath = process.platform === 'win32'
   ? path.join(packageRoot, `${executableName}.exe`)
   : process.platform === 'darwin'
     ? path.join(packageRoot, `${packageName}.app`, 'Contents', 'MacOS', executableName)
     : path.join(packageRoot, executableName);
-await access(executablePath);
+const executablePath = await resolveExecutablePath(process.argv.slice(2), defaultExecutablePath);
 const userDataDirectory = await mkdtemp(path.join(os.tmpdir(), 'opencode-infinite-smoke-'));
 const port = await reservePort();
 const desktop = spawn(executablePath, [
@@ -93,6 +93,29 @@ try {
   await rm(userDataDirectory, { recursive: true, force: true });
 }
 process.stdout.write(`Smoke de escritorio correcto: ${process.platform}/${process.arch}\n`);
+
+async function resolveExecutablePath(args, fallback) {
+  if (args.length === 0) return validateExecutable(fallback, false);
+  if (args.length !== 2 || args[0] !== '--executable' || typeof args[1] !== 'string' || args[1].length === 0) {
+    throw new Error('Uso: smoke-desktop-package.mjs [--executable <ruta-absoluta>].');
+  }
+  return validateExecutable(args[1], true);
+}
+
+async function validateExecutable(candidate, explicit) {
+  if (!path.isAbsolute(candidate)) throw new Error('La ruta del ejecutable Desktop debe ser absoluta.');
+  const info = await lstat(candidate);
+  if (!info.isFile() || info.isSymbolicLink()) throw new Error('El ejecutable Desktop debe ser un archivo regular, no un enlace.');
+  const expectedName = process.platform === 'win32' ? `${executableName}.exe` : executableName;
+  const actualName = path.basename(candidate);
+  const matches = process.platform === 'win32'
+    ? actualName.toLowerCase() === expectedName.toLowerCase()
+    : actualName === expectedName;
+  if (!matches) throw new Error(`Ejecutable Desktop inesperado: ${actualName}. Se esperaba ${expectedName}.`);
+  const resolved = await realpath(candidate);
+  if (explicit) process.stdout.write(`Smoke sobre ejecutable explícito: ${resolved}\n`);
+  return resolved;
+}
 
 async function layoutSnapshot(window) {
   return window.evaluate(() => {

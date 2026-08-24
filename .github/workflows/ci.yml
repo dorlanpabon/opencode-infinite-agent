@@ -35,7 +35,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes fakeroot rpm xvfb
+          sudo apt-get install --yes cpio fakeroot rpm xvfb
       - name: Check
         run: npm run check
       - name: CLI smoke
@@ -66,3 +66,11 @@ jobs:
       - name: Desktop runtime smoke (Linux)
         if: runner.os == 'Linux'
         run: xvfb-run --auto-servernum npm run desktop:smoke
+      - name: Smoke extracted native artifacts (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: npm run desktop:smoke:native -- --artifacts-root "$GITHUB_WORKSPACE/out/make"
+      - name: Smoke extracted native artifacts (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: xvfb-run --auto-servernum npm run desktop:smoke:native -- --artifacts-root "$GITHUB_WORKSPACE/out/make"

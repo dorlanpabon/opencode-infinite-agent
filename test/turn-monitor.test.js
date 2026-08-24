@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const {
   createSessionTurnMonitor,
   SessionTurnError,
+  TurnMonitorTimeout,
 } = require('../src/turn-monitor');
 
 function fakeEventStream() {
@@ -19,7 +20,7 @@ function fakeEventStream() {
 }
 
 function backend(sessionId) {
-  const state = { messages: [], status: {}, failMessages: false };
+  const state = { messages: [], status: {}, failMessages: false, failStatus: 0 };
   const calls = [];
   return {
     state,
@@ -30,7 +31,13 @@ function backend(sessionId) {
         if (state.failMessages) throw new Error('fallo transitorio');
         return state.messages;
       }
-      if (path === '/session/status') return state.status;
+      if (path === '/session/status') {
+        if (state.failStatus > 0) {
+          state.failStatus--;
+          throw new Error('fallo transitorio de status');
+        }
+        return state.status;
+      }
       throw new Error(`Ruta inesperada: ${method} ${path}`);
     },
   };
@@ -47,6 +54,13 @@ function assistant(id, sessionId, { completed = true, error = null, text = 'ok',
       ...(error ? { error } : {}),
     },
     parts: [{ type: 'text', text }],
+  };
+}
+
+function user(id, sessionId, parts) {
+  return {
+    info: { id, sessionID: sessionId, role: 'user', time: { created: 1 } },
+    parts,
   };
 }
 
@@ -236,6 +250,113 @@ test('correlaciona el terminal con el user message exacto', async () => {
   stream.emit({ type: 'message.updated', properties: { info: ours.info } });
   stream.emit({ type: 'session.idle', properties: { sessionID: sessionId } });
   assert.equal((await ticket.promise).info.id, 'msg_our_reply');
+  monitor.close();
+});
+
+test('correlaciona todas las partes y no adopta otro prompt con el mismo texto visible', async () => {
+  const sessionId = 'ses_nonce_parts';
+  const stream = fakeEventStream();
+  const api = backend(sessionId);
+  const expectedParts = [
+    { type: 'text', text: 'Continue working' },
+    { type: 'text', text: '<!-- opencode-infinite-agent-turn:ours -->', synthetic: true, ignored: true },
+  ];
+  const foreignParts = [
+    { type: 'text', text: 'Continue working' },
+    { type: 'text', text: '<!-- opencode-infinite-agent-turn:foreign -->', synthetic: true, ignored: true },
+  ];
+  const monitor = createSessionTurnMonitor({ req: api.req, eventStream: stream, sessionId });
+  const ticket = monitor.waitForTerminal({
+    knownMessageIds: [], expectedUserParts: expectedParts, timeoutMs: 100, hardTimeoutMs: 500,
+  });
+
+  api.state.messages = [
+    user('msg_stripped_user', sessionId, [{ type: 'text', text: 'Continue working' }]),
+    assistant('msg_stripped_reply', sessionId, { parentID: 'msg_stripped_user', text: 'stripped' }),
+    user('msg_foreign_user', sessionId, foreignParts),
+    assistant('msg_foreign_reply', sessionId, { parentID: 'msg_foreign_user', text: 'foreign' }),
+  ];
+  api.state.status = {};
+  stream.emit({ type: 'session.idle', properties: { sessionID: sessionId } });
+  await assertPending(ticket.promise);
+
+  api.state.messages.push(
+    user('msg_duplicate_nonce', sessionId, [
+      ...expectedParts,
+      { ...expectedParts[1] },
+    ]),
+    assistant('msg_duplicate_reply', sessionId, { parentID: 'msg_duplicate_nonce', text: 'duplicate' }),
+  );
+  stream.emit({ type: 'message.updated', properties: { info: api.state.messages.at(-1).info } });
+  await assertPending(ticket.promise);
+
+  api.state.messages.push(
+    user('msg_altered_nonce', sessionId, [
+      ...expectedParts,
+      { type: 'text', text: expectedParts[1].text, synthetic: true },
+    ]),
+    assistant('msg_altered_reply', sessionId, { parentID: 'msg_altered_nonce', text: 'altered' }),
+  );
+  stream.emit({ type: 'message.updated', properties: { info: api.state.messages.at(-1).info } });
+  await assertPending(ticket.promise);
+
+  api.state.messages.push(
+    user('msg_our_user', sessionId, [
+      { type: 'text', text: 'plugin reminder', synthetic: true },
+      ...expectedParts,
+      { type: 'text', text: 'plugin metadata', ignored: true },
+    ]),
+    assistant('msg_our_reply', sessionId, { parentID: 'msg_our_user', text: 'ours' })
+  );
+  stream.emit({ type: 'message.updated', properties: { info: api.state.messages.at(-1).info } });
+  stream.emit({ type: 'session.idle', properties: { sessionID: sessionId } });
+  assert.equal((await ticket.promise).info.id, 'msg_our_reply');
+  monitor.close();
+});
+
+test('touch no prolonga el limite duro', async () => {
+  const sessionId = 'ses_hard_deadline';
+  const stream = fakeEventStream();
+  const api = backend(sessionId);
+  api.state.status = { [sessionId]: { type: 'busy' } };
+  const monitor = createSessionTurnMonitor({ req: api.req, eventStream: stream, sessionId });
+  const ticket = monitor.waitForTerminal({
+    knownMessageIds: [], expectedParentId: 'msg_user', timeoutMs: 20, hardTimeoutMs: 60,
+  });
+  const touches = setInterval(() => {
+    stream.emit({ type: 'message.part.delta', properties: { sessionID: sessionId } });
+  }, 5);
+
+  const outcome = await Promise.race([
+    ticket.promise.then(
+      () => ({ value: 'resolved' }),
+      (error) => ({ value: 'rejected', error })
+    ),
+    delay(180).then(() => ({ value: 'deadline-missed' })),
+  ]);
+  clearInterval(touches);
+  assert.equal(outcome.value, 'rejected', 'los eventos no deben extender hardDeadline');
+  assert.ok(outcome.error instanceof TurnMonitorTimeout);
+  monitor.close();
+});
+
+test('status desconocido se reconcilia hasta el limite duro y no falla al soft', async () => {
+  const sessionId = 'ses_status_unknown';
+  const stream = fakeEventStream();
+  const api = backend(sessionId);
+  api.state.failStatus = 100;
+  api.state.messages = [assistant('msg_recovered_status', sessionId, { parentID: 'msg_user' })];
+  const monitor = createSessionTurnMonitor({ req: api.req, eventStream: stream, sessionId });
+  const ticket = monitor.waitForTerminal({
+    knownMessageIds: [], expectedParentId: 'msg_user', timeoutMs: 15, hardTimeoutMs: 150,
+  });
+
+  await delay(40);
+  await assertPending(ticket.promise, 5);
+  api.state.status = {};
+  api.state.failStatus = 0;
+  stream.emit({ type: 'server.connected' });
+  assert.equal((await ticket.promise).info.id, 'msg_recovered_status');
   monitor.close();
 });
 

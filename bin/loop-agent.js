@@ -197,7 +197,10 @@ async function main() {
     process.exit(1);
   }
 
-  const req = (method, p, body, opts) => server.request(handle.base, method, p, body, opts);
+  const req = (method, p, body, opts) => server.request(handle.base, method, p, body, {
+    ...(opts || {}),
+    directory: cfg.dir,
+  });
 
   // resuelve o crea la sesion
   let session;
@@ -214,18 +217,25 @@ async function main() {
     process.exit(1);
   }
 
+  const abortCtl = new AbortController();
+  const flag = { aborted: false, signal: abortCtl.signal };
+
   // Un solo stream SSE compartido por el monitor de turno y auto-approve.
   // Se inicia despues de resolver la sesion para filtrar permisos exactamente.
   const eventStream = server.startEventStream({
     base: handle.base,
+    directory: cfg.dir,
+    signal: abortCtl.signal,
     debug: log.debug,
   });
   let approverCtl = null;
   if (cfg.autoApprove) {
     approverCtl = server.startPermissionApprover({
       base: handle.base,
+      directory: cfg.dir,
       eventStream,
       sessionId: session.id,
+      signal: abortCtl.signal,
       onResponseSent: (sid, pid) => log.warn(`Permiso auto-aprobado (${pid}) en sesion ${sid}`),
       debug: log.debug,
     });
@@ -237,8 +247,6 @@ async function main() {
     : resumePrompt(cfg.sentinel);
 
   // Ctrl+C: aborta limpio la sesion y sale con codigo 130 tras el reporte
-  const abortCtl = new AbortController();
-  const flag = { aborted: false, signal: abortCtl.signal };
   let interrupts = 0;
   const onSignal = async () => {
     interrupts++;

@@ -38,10 +38,14 @@ test('booleanos explicitos de Desktop prevalecen sobre .looprc.json', async (t) 
     todoDetection: false,
     keepServer: true,
     attach: 'http://127.0.0.1:4096',
+    opencodeBin: '/tmp/workspace-controlled-opencode',
   }));
-  const cfg = loadConfig({ dir, autoApprove: false, noTodos: false, keepServer: false, attach: null });
+  const cfg = loadConfig({
+    dir, autoApprove: false, noTodos: false, keepServer: false, attach: null, opencodeBin: null,
+  });
   assert.equal(cfg.autoApprove, false);
   assert.equal(cfg.todoDetection, true);
   assert.equal(cfg.keepServer, false);
   assert.equal(cfg.attach, null);
+  assert.equal(cfg.opencodeBin, null);
 });

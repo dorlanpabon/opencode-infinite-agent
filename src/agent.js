@@ -38,12 +38,13 @@ function waitForReady(promise, timeoutMs, signal) {
 async function executeAgent(input, options = {}) {
   if (!input || typeof input !== 'object') throw new TypeError('Configuracion de ejecucion invalida');
   const logger = normalizeLogger(options.log);
-  const cfg = loadConfig({
+  const configInput = {
     ...input,
     dir: input.dir ? path.resolve(input.dir) : process.cwd(),
-    opencodeBin: input.binary || input.opencodeBin,
-  });
-  if (input.binary || input.opencodeBin) cfg.opencodeBin = input.binary || input.opencodeBin;
+  };
+  if (Object.prototype.hasOwnProperty.call(input, 'binary')) configInput.opencodeBin = input.binary;
+  else if (Object.prototype.hasOwnProperty.call(input, 'opencodeBin')) configInput.opencodeBin = input.opencodeBin;
+  const cfg = loadConfig(configInput);
   const signal = options.signal || new AbortController().signal;
   const flag = { aborted: signal.aborted, signal };
   let handle = null;
@@ -67,9 +68,12 @@ async function executeAgent(input, options = {}) {
       cfg.base = `http://${cfg.hostname}:${cfg.port}`;
     }
     handle = await server.ensureServer(cfg, logger, { signal });
-    req = (method, pathname, body, requestOptions) => server.request(handle.base, method, pathname, body, requestOptions);
+    req = (method, pathname, body, requestOptions) => server.request(handle.base, method, pathname, body, {
+      ...(requestOptions || {}),
+      directory: cfg.dir,
+    });
     if (options.onTransport) options.onTransport('connecting');
-    eventStream = server.startEventStream({ base: handle.base, debug: logger.debug });
+    eventStream = server.startEventStream({ base: handle.base, directory: cfg.dir, signal, debug: logger.debug });
     await waitForReady(eventStream.ready, 15_000, signal);
     if (options.onTransport) options.onTransport('connected');
 
@@ -85,8 +89,10 @@ async function executeAgent(input, options = {}) {
     if (cfg.autoApprove) {
       approver = server.startPermissionApprover({
         base: handle.base,
+        directory: cfg.dir,
         eventStream,
         sessionId: session.id,
+        signal,
         onResponseSent: (_sid, permissionId) => logger.warn(`Permiso auto-aprobado: ${permissionId}`),
         debug: logger.debug,
       });

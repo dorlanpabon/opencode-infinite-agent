@@ -26,14 +26,38 @@ function authHeaders(base) {
   return { Authorization: 'Basic ' + Buffer.from(`${user}:${pass}`).toString('base64') };
 }
 
-async function request(base, method, pathName, body, { timeoutMs = 30000 } = {}) {
-  const url = base.replace(/\/$/, '') + pathName;
+function scopedRequest(base, method, pathName, directory) {
+  const url = new URL(pathName, `${base.replace(/\/$/, '')}/`);
+  const headers = {};
+  if (directory) {
+    if (method === 'GET' || method === 'HEAD') url.searchParams.set('directory', directory);
+    else headers['x-opencode-directory'] = encodeURIComponent(directory);
+  }
+  return { url: url.toString(), headers };
+}
+
+async function request(base, method, pathName, body, {
+  timeoutMs = 30000,
+  directory = null,
+  signal = null,
+  fetchImpl = fetch,
+} = {}) {
+  const scoped = scopedRequest(base, method, pathName, directory);
   const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  let timedOut = false;
+  const timer = timeoutMs > 0 ? setTimeout(() => {
+    timedOut = true;
+    ctl.abort();
+  }, timeoutMs) : null;
+  const onAbort = () => ctl.abort(signal.reason);
+  if (signal) {
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+  }
   try {
-    const res = await fetch(url, {
+    const res = await fetchImpl(scoped.url, {
       method,
-      headers: { 'content-type': 'application/json', ...authHeaders(base) },
+      headers: { 'content-type': 'application/json', ...scoped.headers, ...authHeaders(base) },
       body: body != null ? JSON.stringify(body) : undefined,
       signal: ctl.signal,
     });
@@ -50,12 +74,18 @@ async function request(base, method, pathName, body, { timeoutMs = 30000 } = {})
     }
     return data;
   } catch (e) {
-    if (e.name === 'AbortError' && timeoutMs) {
+    if (timedOut) {
       throw new Error(`Timeout (${timeoutMs}ms) en ${method} ${pathName}`);
+    }
+    if (signal && signal.aborted) {
+      const aborted = new Error('Solicitud abortada');
+      aborted.name = 'AbortError';
+      throw aborted;
     }
     throw e;
   } finally {
-    clearTimeout(timer);
+    if (timer) clearTimeout(timer);
+    if (signal) signal.removeEventListener('abort', onAbort);
   }
 }
 
@@ -362,18 +392,36 @@ function abortableDelay(ms, signal) {
 // server.connected y permite reconciliar desde la API persistida.
 function startEventStream({
   base,
+  directory = null,
+  signal = null,
   debug,
   fetchImpl = fetch,
   reconnectMinMs = 3000,
   reconnectMaxMs = 15000,
+  heartbeatTimeoutMs = 45000,
 }) {
   const ctl = new AbortController();
   const listeners = new Set();
   const connectionWaiters = new Set();
   let readyResolve;
-  const ready = new Promise((resolve) => { readyResolve = resolve; });
+  let readyReject;
+  const ready = new Promise((resolve, reject) => {
+    readyResolve = resolve;
+    readyReject = reject;
+  });
+  // El CLI espera waitUntilConnected(); mantener este rechazo observado evita
+  // un unhandled rejection si se aborta antes de que exista ese consumidor.
+  void ready.catch(() => {});
   let readyDone = false;
   let connected = false;
+  let activeConnection = null;
+  let activeReader = null;
+
+  const onExternalAbort = () => ctl.abort(signal.reason);
+  if (signal) {
+    if (signal.aborted) onExternalAbort();
+    else signal.addEventListener('abort', onExternalAbort, { once: true });
+  }
 
   function publish(event) {
     for (const listener of [...listeners]) {
@@ -404,25 +452,56 @@ function startEventStream({
     connected = false;
   }
 
-  (async () => {
+  const done = (async () => {
     let backoff = reconnectMinMs;
     while (!ctl.signal.aborted) {
+      const connectionCtl = new AbortController();
+      activeConnection = connectionCtl;
+      let reader = null;
+      const onRootAbort = () => {
+        connectionCtl.abort(ctl.signal.reason);
+        if (reader && typeof reader.cancel === 'function') {
+          void Promise.resolve(reader.cancel()).catch(() => {});
+        }
+      };
+      ctl.signal.addEventListener('abort', onRootAbort, { once: true });
+      let heartbeatTimer = null;
+      let heartbeatExpired = false;
+      const clearHeartbeat = () => {
+        if (heartbeatTimer) clearTimeout(heartbeatTimer);
+        heartbeatTimer = null;
+      };
+      const armHeartbeat = () => {
+        clearHeartbeat();
+        if (!(heartbeatTimeoutMs > 0)) return;
+        heartbeatTimer = setTimeout(() => {
+          heartbeatExpired = true;
+          connectionCtl.abort(new Error('SSE heartbeat timeout'));
+          if (reader && typeof reader.cancel === 'function') {
+            void Promise.resolve(reader.cancel()).catch(() => {});
+          }
+        }, heartbeatTimeoutMs);
+      };
       try {
-        const res = await fetchImpl(base.replace(/\/$/, '') + '/event', {
-          headers: { accept: 'text/event-stream', ...authHeaders(base) },
-          signal: ctl.signal,
+        const scoped = scopedRequest(base, 'GET', '/event', directory);
+        const res = await fetchImpl(scoped.url, {
+          headers: { accept: 'text/event-stream', ...scoped.headers, ...authHeaders(base) },
+          signal: connectionCtl.signal,
         });
         if (!res.ok || !res.body) {
           if (debug) debug(`SSE /event respondio ${res.status}; reintentando...`);
         } else {
           backoff = reconnectMinMs;
           markConnected();
-          const reader = res.body.getReader();
+          reader = res.body.getReader();
+          activeReader = reader;
           const decoder = new TextDecoder();
           let buffer = '';
+          armHeartbeat();
           for (;;) {
             const { done, value } = await reader.read();
             if (done) break;
+            armHeartbeat();
             buffer += decoder.decode(value, { stream: true });
             buffer = parseSseFrames(buffer, publish);
           }
@@ -433,15 +512,39 @@ function startEventStream({
       } catch (error) {
         markDisconnected();
         if (ctl.signal.aborted) break;
-        if (debug) debug(`SSE error: ${error.message}; reconectando...`);
+        if (debug) {
+          const detail = heartbeatExpired ? 'heartbeat vencido' : error.message;
+          debug(`SSE error: ${detail}; reconectando...`);
+        }
+      } finally {
+        clearHeartbeat();
+        ctl.signal.removeEventListener('abort', onRootAbort);
+        if (activeConnection === connectionCtl) activeConnection = null;
+        if (activeReader === reader) activeReader = null;
+        if (reader && typeof reader.releaseLock === 'function') {
+          try { reader.releaseLock(); } catch {}
+        }
       }
       await abortableDelay(backoff, ctl.signal);
       backoff = Math.min(backoff * 2, reconnectMaxMs);
     }
+    if (signal) signal.removeEventListener('abort', onExternalAbort);
+    if (!readyDone) {
+      readyDone = true;
+      readyReject(new Error('SSE abortado'));
+    }
+    for (const waiter of [...connectionWaiters]) waiter.reject(new Error('SSE abortado'));
+    connectionWaiters.clear();
   })();
+
+  if (ctl.signal.aborted && !readyDone) {
+    readyDone = true;
+    readyReject(new Error('SSE abortado'));
+  }
 
   return {
     ready,
+    done,
     signal: ctl.signal,
     get connected() { return connected; },
     waitUntilConnected() {
@@ -455,8 +558,16 @@ function startEventStream({
       return () => listeners.delete(listener);
     },
     abort() {
-      ctl.abort();
+      if (!ctl.signal.aborted) ctl.abort();
+      if (activeConnection) activeConnection.abort();
+      if (activeReader && typeof activeReader.cancel === 'function') {
+        void Promise.resolve(activeReader.cancel()).catch(() => {});
+      }
       markDisconnected();
+      if (!readyDone) {
+        readyDone = true;
+        readyReject(new Error('SSE abortado'));
+      }
       for (const waiter of [...connectionWaiters]) waiter.reject(new Error('SSE abortado'));
       connectionWaiters.clear();
       listeners.clear();
@@ -468,44 +579,86 @@ function startEventStream({
 // No responde permission.updated/replied ni eventos v2 con otro contrato.
 function startPermissionApprover({
   base,
+  directory = null,
   eventStream,
   sessionId,
+  signal = null,
   onResponseSent,
   debug,
   reply = 'once',
   requestFn = request,
+  retryMinMs = 500,
+  retryMaxMs = 10000,
 }) {
   if (!eventStream || typeof eventStream.subscribe !== 'function') {
     throw new Error('Auto-approve requiere eventStream');
   }
   if (!sessionId) throw new Error('Auto-approve requiere sessionId');
+  const ctl = new AbortController();
   const handled = new Set();
+  const jobs = new Map();
   const inFlight = new Set();
+  let retryTimer = null;
+  let retryMs = Math.max(1, Number(retryMinMs) || 500);
+  const retryCeiling = Math.max(retryMs, Number(retryMaxMs) || 10000);
+  let reconcilePromise = null;
+  let reconcileAgain = false;
+  let unsubscribe = () => {};
+
+  const requestOptions = () => ({ timeoutMs: 10000, directory, signal: ctl.signal });
+  const isMissingEndpoint = (error) => error && (error.status === 404 || error.status === 405);
+
+  function scheduleReconcile(delay = retryMs) {
+    if (ctl.signal.aborted || retryTimer) return;
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      if (reconcilePromise) {
+        reconcileAgain = true;
+        return;
+      }
+      void reconcilePending();
+    }, Math.max(0, delay));
+    retryMs = Math.min(retryMs * 2, retryCeiling);
+  }
 
   async function respond(payload) {
     const sid = payload.sessionID || payload.sessionId;
     const pid = payload.id || payload.requestID;
-    if (sid !== sessionId || !pid || handled.has(pid) || inFlight.has(pid)) return;
+    if (ctl.signal.aborted || sid !== sessionId || !pid || handled.has(pid)) return;
+    jobs.set(pid, payload);
+    if (inFlight.has(pid)) return;
     inFlight.add(pid);
     let via = null;
+    let failure = null;
     try {
-      await requestFn(base, 'POST', `/permission/${pid}/reply`, { reply }, { timeoutMs: 10000 });
+      await requestFn(base, 'POST', `/permission/${pid}/reply`, { reply }, requestOptions());
       via = 'nuevo';
-    } catch {}
-    if (!via) {
+    } catch (error) {
+      failure = error;
+    }
+    if (!via && isMissingEndpoint(failure) && !ctl.signal.aborted) {
       try {
-        await requestFn(base, 'POST', `/session/${sid}/permissions/${pid}`, { response: reply }, { timeoutMs: 10000 });
+        await requestFn(base, 'POST', `/session/${sid}/permissions/${pid}`, { response: reply }, requestOptions());
         via = 'legado';
-      } catch {}
+        failure = null;
+      } catch (error) {
+        failure = error;
+      }
     }
     inFlight.delete(pid);
-    if (via) {
+    if (ctl.signal.aborted) return;
+    if (via && !failure) {
+      jobs.delete(pid);
       handled.add(pid);
       if (handled.size > 1000) handled.delete(handled.values().next().value);
-      if (onResponseSent) onResponseSent(sid, pid, payload.permission || 'permission.asked', via);
-    } else if (debug) {
-      debug(`permiso ${pid}: sin respuesta exitosa`);
+      retryMs = Math.max(1, Number(retryMinMs) || 500);
+      if (onResponseSent) {
+        try { onResponseSent(sid, pid, payload.permission || 'permission.asked', via); } catch {}
+      }
+      return;
     }
+    if (debug) debug(`permiso ${pid}: respuesta ambigua; reconciliando antes de reintentar`);
+    scheduleReconcile();
   }
 
   function schedule(payload) {
@@ -515,19 +668,53 @@ function startPermissionApprover({
   }
 
   async function reconcilePending() {
-    let pending;
-    try {
-      pending = await requestFn(base, 'GET', '/permission', null, { timeoutMs: 10000 });
-    } catch (error) {
-      if (debug) debug(`No se pudieron reconciliar permisos pendientes: ${error.message}`);
-      return;
+    if (ctl.signal.aborted) return;
+    if (reconcilePromise) {
+      reconcileAgain = true;
+      return reconcilePromise;
     }
-    const requests = Array.isArray(pending) ? pending
-      : pending && Array.isArray(pending.permissions) ? pending.permissions : [];
-    await Promise.all(requests.map((payload) => respond(payload)));
+    reconcilePromise = (async () => {
+      const knownAtStart = new Set(jobs.keys());
+      let pending;
+      try {
+        pending = await requestFn(base, 'GET', '/permission', null, requestOptions());
+      } catch (error) {
+        if (!ctl.signal.aborted) {
+          if (debug) debug(`No se pudieron reconciliar permisos pendientes: ${error.message}`);
+          scheduleReconcile();
+        }
+        return;
+      }
+      if (ctl.signal.aborted) return;
+      const requests = Array.isArray(pending) ? pending
+        : pending && Array.isArray(pending.permissions) ? pending.permissions
+          : pending && Array.isArray(pending.data) ? pending.data : [];
+      const current = new Map(requests
+        .filter((payload) => (payload.sessionID || payload.sessionId) === sessionId)
+        .map((payload) => [payload.id || payload.requestID, payload])
+        .filter(([pid]) => Boolean(pid)));
+
+      for (const pid of [...jobs.keys()]) {
+        if (knownAtStart.has(pid) && !current.has(pid) && !inFlight.has(pid)) {
+          jobs.delete(pid);
+          handled.add(pid);
+        }
+      }
+      retryMs = Math.max(1, Number(retryMinMs) || 500);
+      await Promise.all([...current.values()].map((payload) => respond(payload)));
+    })();
+    try {
+      return await reconcilePromise;
+    } finally {
+      reconcilePromise = null;
+      if (reconcileAgain && !ctl.signal.aborted) {
+        reconcileAgain = false;
+        scheduleReconcile(0);
+      }
+    }
   }
 
-  const unsubscribe = eventStream.subscribe((raw) => {
+  unsubscribe = eventStream.subscribe((raw) => {
     const event = unwrapEvent(raw);
     if (!event) return;
     if (event.type === 'server.connected') {
@@ -539,7 +726,29 @@ function startPermissionApprover({
   });
   void reconcilePending();
 
-  return { abort: unsubscribe, reconcile: reconcilePending };
+  function abort() {
+    if (!ctl.signal.aborted) ctl.abort();
+    unsubscribe();
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = null;
+    jobs.clear();
+    inFlight.clear();
+    reconcileAgain = false;
+  }
+
+  const onExternalAbort = () => abort();
+  if (signal) {
+    if (signal.aborted) abort();
+    else signal.addEventListener('abort', onExternalAbort, { once: true });
+  }
+
+  return {
+    abort() {
+      if (signal) signal.removeEventListener('abort', onExternalAbort);
+      abort();
+    },
+    reconcile: reconcilePending,
+  };
 }
 
 module.exports = {

@@ -20,6 +20,13 @@ class TurnMonitorAborted extends Error {
   }
 }
 
+class TurnCorrelationError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'TurnCorrelationError';
+  }
+}
+
 function normalizeEvent(input) {
   if (!input || typeof input !== 'object') return null;
   if (input.payload && typeof input.payload === 'object' && input.payload.type) return input.payload;
@@ -51,6 +58,65 @@ function terminalMessageIds(messages) {
   return new Set((Array.isArray(messages) ? messages : [])
     .filter(isTerminalAssistant)
     .map((message) => message.info.id));
+}
+
+function messageIds(messages) {
+  return new Set((Array.isArray(messages) ? messages : [])
+    .map((message) => message && message.info && message.info.id)
+    .filter(Boolean));
+}
+
+function isRealUserMessage(message) {
+  return Boolean(message && message.info && message.info.id && message.info.role === 'user' &&
+    Array.isArray(message.parts) && (message.parts.length === 0 || message.parts.some((part) => !part.synthetic)));
+}
+
+function samePromptPart(actual, expected) {
+  return Boolean(actual && expected && actual.type === 'text' && expected.type === 'text' &&
+    typeof actual.text === 'string' && actual.text === expected.text &&
+    Boolean(actual.synthetic) === Boolean(expected.synthetic) &&
+    Boolean(actual.ignored) === Boolean(expected.ignored));
+}
+
+function userMessageMatchesParts(message, expectedParts) {
+  if (!isRealUserMessage(message) || !Array.isArray(expectedParts) || expectedParts.length === 0) return false;
+  const actualParts = message.parts;
+  const nonceParts = expectedParts.filter((part) => part && part.type === 'text' && part.synthetic && part.ignored);
+  if (nonceParts.length === 0 || nonceParts.some((nonce) =>
+    actualParts.filter((actual) => actual && actual.type === 'text' && actual.text === nonce.text).length !== 1)) return false;
+  if (expectedParts.some((expected) =>
+    actualParts.filter((actual) => samePromptPart(actual, expected)).length !== 1)) return false;
+
+  let expectedIndex = 0;
+  for (const actual of actualParts) {
+    if (expectedIndex < expectedParts.length && samePromptPart(actual, expectedParts[expectedIndex])) {
+      expectedIndex++;
+      continue;
+    }
+    if (!actual || (!actual.synthetic && !actual.ignored)) return false;
+  }
+  return expectedIndex === expectedParts.length;
+}
+
+function unresolvedTurnParentIds(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  const terminalParents = new Set(list
+    .filter(isTerminalAssistant)
+    .map((message) => message.info.parentID)
+    .filter(Boolean));
+  const candidates = new Set();
+  for (const message of list) {
+    const info = message && message.info;
+    if (!info) continue;
+    if (info.role === 'assistant' && !isTerminalAssistant(message) && info.parentID) candidates.add(info.parentID);
+    if (isRealUserMessage(message) && !terminalParents.has(info.id)) candidates.add(info.id);
+  }
+  return candidates;
+}
+
+function activeTurnParentId(messages) {
+  const candidates = unresolvedTurnParentIds(messages);
+  return candidates.size === 1 ? [...candidates][0] : null;
 }
 
 function newestTerminal(messages, knownIds, expectedParentId = null) {
@@ -142,6 +208,7 @@ class SessionTurnMonitor {
   waitForTerminal({
     knownMessageIds,
     expectedParentId = null,
+    expectedUserParts = null,
     timeoutMs,
     hardTimeoutMs,
     signal,
@@ -161,6 +228,14 @@ class SessionTurnMonitor {
     const active = {
       knownIds: knownMessageIds instanceof Set ? new Set(knownMessageIds) : new Set(knownMessageIds || []),
       expectedParentId,
+      expectedUserParts: Array.isArray(expectedUserParts)
+        ? expectedUserParts.map((part) => ({
+          type: part && part.type,
+          text: part && part.text,
+          synthetic: Boolean(part && part.synthetic),
+          ignored: Boolean(part && part.ignored),
+        }))
+        : null,
       resolve: resolvePromise,
       reject: rejectPromise,
       promise,
@@ -172,6 +247,7 @@ class SessionTurnMonitor {
       idleSeen: false,
       sawBusy: false,
       statusType: 'unknown',
+      statusUncertain: true,
       signal: signal || null,
       abortHandler: null,
       settled: false,
@@ -208,7 +284,8 @@ class SessionTurnMonitor {
       case 'session.status': {
         const status = props.status && typeof props.status === 'object' ? props.status : props;
         const type = status.type || 'unknown';
-        this.active.statusType = type;
+        this.active.statusUncertain = type === 'unknown';
+        if (!this.active.statusUncertain) this.active.statusType = type;
         if (type === 'idle') {
           this.active.idleSeen = true;
           this.requestReconcile('session.status idle');
@@ -221,6 +298,7 @@ class SessionTurnMonitor {
       }
       case 'session.idle':
         this.active.statusType = 'idle';
+        this.active.statusUncertain = false;
         this.active.idleSeen = true;
         this.requestReconcile('session.idle');
         break;
@@ -264,27 +342,41 @@ class SessionTurnMonitor {
   touch() {
     const active = this.active;
     if (!active || active.settled) return;
-    this.armWatchdog(active.softMs);
+    this.armWatchdog(Math.min(active.softMs, Math.max(0, active.hardDeadline - Date.now())));
   }
 
   armWatchdog(ms) {
     const active = this.active;
     if (!active || active.settled) return;
     if (active.watchdog) clearTimeout(active.watchdog);
+    const remaining = Math.max(0, active.hardDeadline - Date.now());
+    const delay = Math.min(Math.max(0, Number(ms) || 0), remaining);
     active.watchdog = setTimeout(() => {
       if (this.active === active && !active.settled) void this.onWatchdog(active);
-    }, ms);
+    }, delay);
   }
 
   async onWatchdog(active) {
     try {
       await this.reconcile();
     } catch (error) {
-      if (this.active === active && !active.settled) this.rejectActive(error);
+      if (this.active !== active || active.settled) return;
+      if (this.log && typeof this.log.debug === 'function') {
+        this.log.debug(`Read-repair watchdog fallo: ${error.message}`);
+      }
+      const remaining = active.hardDeadline - Date.now();
+      if (remaining > 0) {
+        this.armWatchdog(Math.min(active.softMs, remaining));
+        return;
+      }
+      this.rejectActive(new TurnMonitorTimeout(
+        'El turno no pudo reconciliarse antes del limite duro'
+      ));
       return;
     }
     if (this.active !== active || active.settled) return;
-    if ((active.statusType === 'busy' || active.statusType === 'retry') && Date.now() < active.hardDeadline) {
+    if ((active.statusType === 'busy' || active.statusType === 'retry' || active.statusUncertain) &&
+      Date.now() < active.hardDeadline) {
       this.armWatchdog(Math.min(active.softMs, Math.max(1, active.hardDeadline - Date.now())));
       return;
     }
@@ -308,21 +400,38 @@ class SessionTurnMonitor {
         const snapshot = await this.snapshot();
         if (this.active !== active || active.settled) return null;
 
-        const terminal = newestTerminal(snapshot.messages, active.knownIds, active.expectedParentId);
+        if (!active.expectedParentId && active.expectedUserParts != null) {
+          const matchingUsers = snapshot.messages.filter((message) =>
+            isRealUserMessage(message) && !active.knownIds.has(message.info.id) &&
+            userMessageMatchesParts(message, active.expectedUserParts));
+          if (matchingUsers.length > 1) {
+            this.rejectActive(new TurnCorrelationError(
+              'No se pudo correlacionar el prompt: hay multiples mensajes user nuevos con las mismas partes'
+            ));
+            return null;
+          }
+          if (matchingUsers.length === 1) active.expectedParentId = matchingUsers[0].info.id;
+        }
+
+        const terminal = active.expectedUserParts != null && !active.expectedParentId
+          ? null
+          : newestTerminal(snapshot.messages, active.knownIds, active.expectedParentId);
         const type = snapshot.status.type || 'unknown';
-        active.statusType = type;
+        active.statusUncertain = type === 'unknown';
+        if (!active.statusUncertain) active.statusType = type;
         if (type === 'idle' && (terminal || active.sawBusy || active.pendingError)) active.idleSeen = true;
         else if (type === 'busy' || type === 'retry') {
           active.sawBusy = true;
           active.idleSeen = false;
         }
 
-        if (terminal && active.idleSeen) {
+        if (terminal && active.idleSeen && !active.statusUncertain) {
           this.resolveActive(terminal);
           return terminal;
         }
 
-        if (active.pendingError && Date.now() >= active.pendingError.dueAt && active.idleSeen && !terminal) {
+        if (active.pendingError && Date.now() >= active.pendingError.dueAt && active.idleSeen &&
+          !active.statusUncertain && !terminal) {
           const detail = active.pendingError.detail;
           this.rejectActive(new SessionTurnError(errorMessage(detail), detail));
           return null;
@@ -381,12 +490,18 @@ module.exports = {
   TurnMonitorTimeout,
   SessionTurnError,
   TurnMonitorAborted,
+  TurnCorrelationError,
   createSessionTurnMonitor,
   normalizeEvent,
   eventProperties,
   eventSessionId,
   isTerminalAssistant,
   terminalMessageIds,
+  messageIds,
+  isRealUserMessage,
+  userMessageMatchesParts,
+  unresolvedTurnParentIds,
+  activeTurnParentId,
   newestTerminal,
   sessionStatusOf,
 };
