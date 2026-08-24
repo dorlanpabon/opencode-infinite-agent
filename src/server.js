@@ -248,65 +248,79 @@ async function stopServer(handle) {
 }
 
 // escucha el stream /event y responde automaticamente las peticiones de permiso
-// eventos: permission.asked | permission.v2.asked
+// filtro amplio: cualquier evento /permission/i con id pendiente se responde
+// (cubre permission.asked, permission.updated, variantes v2 segun version)
 // respuesta: endpoint nuevo POST /permission/:id/reply {reply} con fallback al
 // viejo POST /session/:id/permissions/:pid {response}
+// reconexion automatica: el stream puede caer en corridas de horas
 function startEventListener({ base, sessionId, onResponseSent, debug, reply = 'once' }) {
   const ctl = new AbortController();
-  (async () => {
+
+  async function processEvent(ev) {
+    const type = String(ev.type || ev.name || '');
+    if (!/permission/i.test(type)) return;
+    const payload = ev.properties || ev.data || ev.payload || ev.attributes || {};
+    const pid = payload.id || payload.permissionID;
+    const sid = payload.sessionID || sessionId;
+    if (!pid || !sid) return;
+    let via = null;
     try {
-      const res = await fetch(base.replace(/\/$/, '') + '/event', {
-        headers: { accept: 'text/event-stream', ...authHeaders() },
-        signal: ctl.signal,
-      });
-      if (!res.ok || !res.body) {
-        if (debug) debug(`SSE /event no disponible (${res.status})`);
-        return;
-      }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = '';
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        let idx;
-        while ((idx = buf.indexOf('\n')) >= 0) {
-          const line = buf.slice(0, idx).trim();
-          buf = buf.slice(idx + 1);
-          if (!line.startsWith('data:')) continue;
-          try {
-            const ev = JSON.parse(line.slice(5).trim());
-            const type = String(ev.type || ev.name || '');
-            if (/permission/i.test(type) && /(ask|request)/i.test(type)) {
-              const payload = ev.properties || ev.data || ev.payload || ev.attributes || {};
-              const pid = payload.id || payload.permissionID;
-              const sid = payload.sessionID || sessionId;
-              if (!pid || !sid) continue;
-              let via = null;
+      await request(base, 'POST', `/permission/${pid}/reply`, { reply }, { timeoutMs: 10000 });
+      via = 'nuevo';
+    } catch {}
+    if (!via) {
+      try {
+        await request(base, 'POST', `/session/${sid}/permissions/${pid}`, { response: reply }, { timeoutMs: 10000 });
+        via = 'legado';
+      } catch {}
+    }
+    if (onResponseSent && via) {
+      onResponseSent(sid, pid, payload.permission || type, via);
+    } else if (debug) {
+      debug(`permiso ${pid} (${type}): sin respuesta exitosa`);
+    }
+  }
+
+  (async () => {
+    let backoff = 3000;
+    for (;;) {
+      if (ctl.signal.aborted) return;
+      try {
+        const res = await fetch(base.replace(/\/$/, '') + '/event', {
+          headers: { accept: 'text/event-stream', ...authHeaders() },
+          signal: ctl.signal,
+        });
+        if (!res.ok || !res.body) {
+          if (debug) debug(`SSE /event respondio ${res.status}; reintentando...`);
+        } else {
+          backoff = 3000;
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buf = '';
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            let idx;
+            while ((idx = buf.indexOf('\n')) >= 0) {
+              const line = buf.slice(0, idx).trim();
+              buf = buf.slice(idx + 1);
+              if (!line.startsWith('data:')) continue;
               try {
-                await request(base, 'POST', `/permission/${pid}/reply`, { reply }, { timeoutMs: 10000 });
-                via = 'nuevo';
-              } catch {}
-              if (!via) {
-                try {
-                  await request(base, 'POST', `/session/${sid}/permissions/${pid}`, { response: reply }, { timeoutMs: 10000 });
-                  via = 'legado';
-                } catch {}
-              }
-              if (onResponseSent && via) {
-                onResponseSent(sid, pid, payload.permission || type, via);
-              } else if (debug) {
-                debug(`permiso ${pid}: no se pudo responder por ningun endpoint`);
+                await processEvent(JSON.parse(line.slice(5).trim()));
+              } catch (e) {
+                if (debug) debug(`evento SSE no procesado: ${e.message}`);
               }
             }
-          } catch (e) {
-            if (debug) debug(`evento SSE no procesado: ${e.message}`);
           }
+          if (debug) debug('SSE terminado; reconectando...');
         }
+      } catch (e) {
+        if (ctl.signal.aborted) return;
+        if (debug) debug(`SSE error: ${e.message}; reconectando...`);
       }
-    } catch (e) {
-      if (!ctl.signal.aborted && debug) debug(`stream SSE terminado: ${e.message}`);
+      await new Promise((r) => setTimeout(r, backoff));
+      backoff = Math.min(backoff * 2, 15000);
     }
   })();
   return ctl;
