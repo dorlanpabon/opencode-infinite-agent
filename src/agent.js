@@ -6,6 +6,12 @@ const { runLoop } = require('./loop');
 
 function noop() {}
 
+function abortRemoteSession(req, session, options = {}) {
+  if (options.abortRemoteOnSignal === false || !req || !session) return false;
+  void req('POST', `/session/${session.id}/abort`, {}, { timeoutMs: 5000 }).catch(noop);
+  return true;
+}
+
 function normalizeLogger(logger) {
   const target = logger || {};
   return {
@@ -55,9 +61,7 @@ async function executeAgent(input, options = {}) {
 
   const abort = () => {
     flag.aborted = true;
-    if (req && session) {
-      void req('POST', `/session/${session.id}/abort`, {}, { timeoutMs: 5000 }).catch(noop);
-    }
+    abortRemoteSession(req, session, options);
   };
   signal.addEventListener('abort', abort, { once: true });
 
@@ -122,4 +126,4 @@ async function executeAgent(input, options = {}) {
   }
 }
 
-module.exports = { executeAgent, normalizeLogger, waitForReady };
+module.exports = { executeAgent, normalizeLogger, waitForReady, abortRemoteSession };

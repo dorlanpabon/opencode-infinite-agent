@@ -3,8 +3,10 @@ import type {
   DesktopEvent,
   DoctorResult,
   LogLevel,
+  OpenCodeSessionSummary,
   RunState,
   RunStatus,
+  SessionConnectionInput,
   StartRunInput,
 } from '../contracts.js';
 
@@ -65,6 +67,14 @@ const ui = {
   newRunShortcut: element<HTMLElement>('new-run-shortcut'),
   emptyNewRunButton: element<HTMLButtonElement>('empty-new-run-button'),
   runCount: element<HTMLElement>('run-count'),
+  sessionCount: element<HTMLElement>('session-count'),
+  sessionsViewButton: element<HTMLButtonElement>('sessions-view-button'),
+  runsViewButton: element<HTMLButtonElement>('runs-view-button'),
+  sessionsView: element<HTMLElement>('sessions-view'),
+  runsView: element<HTMLElement>('runs-view'),
+  sessionsConnectButton: element<HTMLButtonElement>('sessions-connect-button'),
+  sessionList: element<HTMLElement>('session-list'),
+  sessionListEmpty: element<HTMLElement>('session-list-empty'),
   runList: element<HTMLElement>('run-list'),
   runListEmpty: element<HTMLElement>('run-list-empty'),
   appVersion: element<HTMLElement>('app-version'),
@@ -113,14 +123,18 @@ const ui = {
   logsEmpty: element<HTMLElement>('logs-empty'),
   runDialog: element<HTMLDialogElement>('run-dialog'),
   form: element<HTMLFormElement>('run-form'),
+  dialogTitle: element<HTMLElement>('dialog-title'),
+  dialogDescription: element<HTMLElement>('dialog-description'),
   dialogCloseButton: element<HTMLButtonElement>('dialog-close-button'),
   dialogCancelButton: element<HTMLButtonElement>('dialog-cancel-button'),
   taskInput: element<HTMLTextAreaElement>('task-input'),
+  taskField: element<HTMLElement>('task-field'),
   taskCount: element<HTMLElement>('task-count'),
   workspaceInput: element<HTMLInputElement>('workspace-input'),
   workspacePickerButton: element<HTMLButtonElement>('workspace-picker-button'),
   nameInput: element<HTMLInputElement>('name-input'),
   maxIterationsInput: element<HTMLInputElement>('max-iterations-input'),
+  limitsFields: element<HTMLElement>('limits-fields'),
   maxHoursInput: element<HTMLInputElement>('max-hours-input'),
   stallMinutesInput: element<HTMLInputElement>('stall-minutes-input'),
   sentinelInput: element<HTMLInputElement>('sentinel-input'),
@@ -146,9 +160,14 @@ const ui = {
 };
 
 let runs: RunState[] = [];
+let sessions: OpenCodeSessionSummary[] = [];
 let selectedRunId: string | null = null;
 let logs: LogEntry[] = [];
 let doctorResult: DoctorResult | null = null;
+let sessionConnection: SessionConnectionInput | null = null;
+let dialogMode: 'new' | 'connect' | 'activate' = 'new';
+let activationTarget: OpenCodeSessionSummary | null = null;
+const pendingSessionModes = new Map<string, boolean>();
 
 function selectedRun(): RunState | null {
   return selectedRunId ? runs.find((run) => run.runId === selectedRunId) ?? null : null;
@@ -251,6 +270,96 @@ function upsertRun(run: RunState): void {
   else runs[index] = run;
   runs.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   if (!selectedRunId) selectedRunId = run.runId;
+}
+
+function hasActiveRun(): boolean {
+  return runs.some((run) => ACTIVE_STATUSES.has(run.status));
+}
+
+function sessionStatusLabel(session: OpenCodeSessionSummary): string {
+  if (session.status === 'busy') return 'Trabajando';
+  if (session.status === 'retry') return 'Reintentando';
+  return 'En espera';
+}
+
+function renderSessionList(): void {
+  const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const focusedSessionId = activeElement?.dataset.sessionId
+    ?? activeElement?.dataset.sessionFocusFallback
+    ?? null;
+  const fragment = document.createDocumentFragment();
+  const globallyBusy = hasActiveRun();
+  for (const [index, session] of sessions.entries()) {
+    const blockedByGlobalRun = globallyBusy && !session.continuous;
+    const item = document.createElement('article');
+    item.className = 'session-item';
+    item.dataset.status = session.status;
+    item.dataset.sessionFocusFallback = session.id;
+    item.tabIndex = -1;
+    item.setAttribute('aria-label', `${session.title}. ${sessionStatusLabel(session)}.`);
+
+    const content = document.createElement('span');
+    content.className = 'session-item-content';
+    const title = document.createElement('strong');
+    title.textContent = session.title;
+    title.title = session.title;
+    const meta = document.createElement('small');
+    meta.textContent = `${sessionStatusLabel(session)} · ${formatRelative(session.updatedAt)}`;
+    content.append(title, meta);
+
+    const label = document.createElement('label');
+    label.className = 'session-switch';
+    const labelText = document.createElement('span');
+    labelText.className = 'session-switch-text';
+    labelText.textContent = 'Continuar hasta terminar';
+    const toggle = document.createElement('input');
+    toggle.type = 'checkbox';
+    toggle.role = 'switch';
+    toggle.dataset.sessionId = session.id;
+    toggle.checked = session.continuous;
+    toggle.disabled = pendingSessionModes.has(session.id) || blockedByGlobalRun;
+    toggle.setAttribute('aria-label', `${session.continuous ? 'Desactivar' : 'Activar'} modo continuo para ${session.title}`);
+    if (blockedByGlobalRun) {
+      const reason = document.createElement('span');
+      reason.className = 'session-switch-reason';
+      reason.id = `session-switch-reason-${String(index)}`;
+      reason.textContent = 'Hay otra ejecución activa';
+      toggle.setAttribute('aria-describedby', reason.id);
+      label.append(labelText, reason);
+    } else {
+      label.append(labelText);
+    }
+    const track = document.createElement('span');
+    track.className = 'session-switch-track';
+    track.setAttribute('aria-hidden', 'true');
+    label.append(toggle, track);
+    toggle.addEventListener('change', () => {
+      if (toggle.checked) {
+        toggle.checked = false;
+        openRunDialog(session);
+      } else {
+        toggle.disabled = true;
+        void disableContinuous(session);
+      }
+    });
+    item.append(content, label);
+    fragment.append(item);
+  }
+  ui.sessionList.replaceChildren(fragment);
+  if (focusedSessionId) {
+    const replacement = [...ui.sessionList.querySelectorAll<HTMLInputElement>('input[data-session-id]')]
+      .find((input) => input.dataset.sessionId === focusedSessionId);
+    if (replacement && !replacement.disabled) {
+      replacement.focus();
+    } else {
+      const fallback = [...ui.sessionList.querySelectorAll<HTMLElement>('[data-session-focus-fallback]')]
+        .find((item) => item.dataset.sessionFocusFallback === focusedSessionId);
+      fallback?.focus();
+    }
+  }
+  ui.sessionCount.textContent = String(sessions.length);
+  ui.sessionListEmpty.hidden = sessions.length > 0;
+  ui.sessionsConnectButton.disabled = globallyBusy;
 }
 
 function renderRunList(): void {
@@ -381,6 +490,7 @@ function render(): void {
   if (selectedRunId && !runs.some((run) => run.runId === selectedRunId)) selectedRunId = runs[0]?.runId ?? null;
   if (!selectedRunId && runs.length > 0) selectedRunId = runs[0]!.runId;
   renderRunList();
+  renderSessionList();
   renderSelectedRun();
 }
 
@@ -452,21 +562,63 @@ function updateAutoApprove(): void {
   if (!enabled) ui.autoApproveConfirmationInput.checked = false;
 }
 
-function openRunDialog(): void {
+function applyDialogConnection(): void {
   const run = selectedRun();
-  const workspace = run?.workspace ?? ui.workspaceInput.value;
-  const binary = run?.binary ?? ui.binaryInput.value;
-  const attach = run?.attach ?? ui.attachInput.value;
-  ui.form.reset();
+  const workspace = sessionConnection?.workspace ?? run?.workspace ?? ui.workspaceInput.value;
+  const binary = sessionConnection?.binary ?? run?.binary ?? ui.binaryInput.value;
+  const attach = sessionConnection?.attach ?? run?.attach ?? ui.attachInput.value;
   ui.workspaceInput.value = workspace;
   ui.binaryInput.value = binary ?? '';
   ui.attachInput.value = attach ?? '';
-  ui.taskCount.textContent = '0 / 8000';
-  ui.advancedSettings.open = false;
+}
+
+function openRunDialog(target: OpenCodeSessionSummary | null = null): void {
+  dialogMode = target ? 'activate' : 'new';
+  activationTarget = target;
+  ui.form.reset();
+  applyDialogConnection();
+  ui.taskField.hidden = Boolean(target);
+  ui.limitsFields.hidden = false;
+  ui.sessionInput.readOnly = Boolean(target);
+  ui.advancedSettings.open = Boolean(target);
+  if (target) {
+    ui.dialogTitle.textContent = 'Activar modo continuo';
+    ui.dialogDescription.textContent = 'El supervisor adoptará esta sesión y solo continuará después de su parada real.';
+    ui.taskInput.value = `Continuar hasta finalizar: ${target.title}`;
+    ui.nameInput.value = target.title;
+    ui.sessionInput.value = target.id;
+    ui.runSubmitButton.textContent = 'Activar modo continuo';
+  } else {
+    ui.dialogTitle.textContent = 'Nueva ejecución';
+    ui.dialogDescription.textContent = 'Define la tarea y los límites del supervisor local.';
+    ui.taskInput.value = '';
+    ui.runSubmitButton.textContent = 'Iniciar supervisor';
+  }
+  ui.taskCount.textContent = `${ui.taskInput.value.length} / 8000`;
   updateAutoApprove();
   setFormError(null);
   if (!ui.runDialog.open) ui.runDialog.showModal();
-  window.setTimeout(() => ui.taskInput.focus(), 0);
+  window.setTimeout(() => (target ? ui.maxIterationsInput : ui.taskInput).focus(), 0);
+}
+
+function openConnectionDialog(): void {
+  dialogMode = 'connect';
+  activationTarget = null;
+  ui.form.reset();
+  applyDialogConnection();
+  ui.taskInput.value = 'Conectar catálogo de sesiones';
+  ui.taskField.hidden = true;
+  ui.limitsFields.hidden = true;
+  ui.sessionInput.readOnly = false;
+  ui.sessionInput.value = '';
+  ui.advancedSettings.open = true;
+  ui.dialogTitle.textContent = 'Conectar sesiones';
+  ui.dialogDescription.textContent = 'Usa el mismo workspace y servidor local que OpenCode.';
+  ui.runSubmitButton.textContent = 'Ver sesiones';
+  updateAutoApprove();
+  setFormError(null);
+  if (!ui.runDialog.open) ui.runDialog.showModal();
+  window.setTimeout(() => ui.workspaceInput.focus(), 0);
 }
 
 function closeRunDialog(): void {
@@ -490,7 +642,30 @@ function startInput(): StartRunInput {
     todoDetection: ui.todosInput.checked,
     autoApprove: ui.autoApproveInput.checked,
     autoApproveConfirmation: ui.autoApproveInput.checked && ui.autoApproveConfirmationInput.checked,
+    resumeExisting: dialogMode === 'activate',
   };
+}
+
+function connectionInput(): SessionConnectionInput {
+  return {
+    workspace: ui.workspaceInput.value.trim(),
+    binary: ui.binaryInput.value.trim() || null,
+    attach: ui.attachInput.value.trim() || null,
+  };
+}
+
+async function loadSessions(input: SessionConnectionInput, showToast = true): Promise<void> {
+  ui.sessionList.setAttribute('aria-busy', 'true');
+  try {
+    const next = await api.listSessions(input);
+    sessionConnection = input;
+    sessions = next;
+    ui.sessionsConnectButton.textContent = 'Servidor conectado · Cambiar…';
+    render();
+    if (showToast) toast(`${next.length} sesiones cargadas.`);
+  } finally {
+    ui.sessionList.setAttribute('aria-busy', 'false');
+  }
 }
 
 async function submitRun(event: SubmitEvent): Promise<void> {
@@ -501,24 +676,58 @@ async function submitRun(event: SubmitEvent): Promise<void> {
     return;
   }
   ui.runSubmitButton.disabled = true;
-  ui.runSubmitButton.textContent = 'Iniciando…';
+  ui.runSubmitButton.textContent = dialogMode === 'connect' ? 'Conectando…' : 'Iniciando…';
   try {
-    const receipt = await api.startRun(startInput());
+    if (dialogMode === 'connect') {
+      await loadSessions(connectionInput());
+      closeRunDialog();
+      announce('Catálogo de sesiones conectado.');
+      return;
+    }
+    const runInput = startInput();
+    if (dialogMode === 'activate' && activationTarget) {
+      pendingSessionModes.set(activationTarget.id, true);
+      render();
+    }
+    const receipt = dialogMode === 'activate' && activationTarget
+      ? await api.setContinuous({ enabled: true, sessionId: activationTarget.id, run: runInput })
+      : await api.startRun(runInput);
     selectedRunId = receipt.runId;
+    sessionConnection = connectionInput();
     closeRunDialog();
-    appendLog('info', `Ejecución ${receipt.runId} iniciada.`);
-    toast('Supervisor iniciado.');
-    announce('Ejecución iniciada.');
+    appendLog('info', `${dialogMode === 'activate' ? 'Modo continuo' : 'Ejecución'} ${receipt.runId} iniciado.`);
+    toast(dialogMode === 'activate' ? 'Modo continuo activado.' : 'Supervisor iniciado.');
+    announce(dialogMode === 'activate' ? 'Modo continuo activado.' : 'Ejecución iniciada.');
     const state = await api.getRun(receipt.runId);
     upsertRun(state);
     render();
+    void loadSessions(sessionConnection, false).catch((error) => appendLog('warn', `Sesiones: ${errorText(error)}`));
   } catch (error) {
+    if (activationTarget) pendingSessionModes.delete(activationTarget.id);
     const message = errorText(error);
     setFormError(message);
     appendLog('error', `Inicio: ${message}`);
   } finally {
     ui.runSubmitButton.disabled = false;
-    ui.runSubmitButton.textContent = 'Iniciar supervisor';
+    ui.runSubmitButton.textContent = dialogMode === 'connect'
+      ? 'Ver sesiones'
+      : dialogMode === 'activate' ? 'Activar modo continuo' : 'Iniciar supervisor';
+  }
+}
+
+async function disableContinuous(session: OpenCodeSessionSummary): Promise<void> {
+  pendingSessionModes.set(session.id, false);
+  render();
+  try {
+    await api.setContinuous({ enabled: false, sessionId: session.id, run: null });
+    appendLog('info', `Modo continuo desactivado para ${session.id}; el turno remoto no fue abortado.`);
+    toast('Modo continuo desactivado.');
+  } catch (error) {
+    pendingSessionModes.delete(session.id);
+    const message = errorText(error);
+    appendLog('error', `Modo continuo: ${message}`);
+    toast(message, true);
+    render();
   }
 }
 
@@ -587,6 +796,15 @@ function handleDesktopEvent(event: DesktopEvent): void {
       toast(event.error.message, true);
       announce('La ejecución terminó con un error.');
       break;
+    case 'sessions-snapshot':
+      sessions = event.sessions;
+      for (const [sessionId, desired] of pendingSessionModes) {
+        if (sessions.some((session) => session.id === sessionId && session.continuous === desired)) {
+          pendingSessionModes.delete(sessionId);
+        }
+      }
+      render();
+      break;
     case 'log':
       appendLog(event.level, event.message, event.timestamp);
       break;
@@ -612,9 +830,44 @@ function tabKeydown(event: KeyboardEvent): void {
   setTab(event.key === 'ArrowLeft' || event.key === 'Home' ? 'inspector' : 'logs', true);
 }
 
+function setSidebarView(view: 'sessions' | 'runs'): void {
+  const showSessions = view === 'sessions';
+  ui.sessionsViewButton.classList.toggle('is-active', showSessions);
+  ui.runsViewButton.classList.toggle('is-active', !showSessions);
+  ui.sessionsViewButton.setAttribute('aria-selected', String(showSessions));
+  ui.runsViewButton.setAttribute('aria-selected', String(!showSessions));
+  ui.sessionsViewButton.tabIndex = showSessions ? 0 : -1;
+  ui.runsViewButton.tabIndex = showSessions ? -1 : 0;
+  ui.sessionsView.hidden = !showSessions;
+  ui.runsView.hidden = showSessions;
+}
+
+function sidebarTabKeydown(event: KeyboardEvent): void {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault();
+  const tabs = [
+    { view: 'sessions' as const, button: ui.sessionsViewButton },
+    { view: 'runs' as const, button: ui.runsViewButton },
+  ];
+  const currentIndex = tabs.findIndex(({ button }) => button === event.currentTarget);
+  if (currentIndex < 0) return;
+  const direction = event.key === 'ArrowRight' ? 1 : -1;
+  const nextIndex = event.key === 'Home'
+    ? 0
+    : event.key === 'End' ? tabs.length - 1 : (currentIndex + direction + tabs.length) % tabs.length;
+  const target = tabs[nextIndex]!;
+  setSidebarView(target.view);
+  target.button.focus();
+}
+
 function wireEvents(): () => void {
-  ui.newRunButton.addEventListener('click', openRunDialog);
-  ui.emptyNewRunButton.addEventListener('click', openRunDialog);
+  ui.newRunButton.addEventListener('click', () => openRunDialog());
+  ui.emptyNewRunButton.addEventListener('click', () => openRunDialog());
+  ui.sessionsConnectButton.addEventListener('click', openConnectionDialog);
+  ui.sessionsViewButton.addEventListener('click', () => setSidebarView('sessions'));
+  ui.runsViewButton.addEventListener('click', () => setSidebarView('runs'));
+  ui.sessionsViewButton.addEventListener('keydown', sidebarTabKeydown);
+  ui.runsViewButton.addEventListener('keydown', sidebarTabKeydown);
   ui.dialogCloseButton.addEventListener('click', closeRunDialog);
   ui.dialogCancelButton.addEventListener('click', closeRunDialog);
   ui.form.addEventListener('submit', (event) => { void submitRun(event); });
@@ -648,6 +901,7 @@ function wireEvents(): () => void {
 
 async function initialize(): Promise<void> {
   setTab('inspector');
+  setSidebarView('sessions');
   renderLogs();
   try {
     const info = await api.systemInfo();
@@ -661,6 +915,11 @@ async function initialize(): Promise<void> {
     runs = await api.listRuns();
     selectedRunId = runs[0]?.runId ?? null;
     render();
+    const basis = runs[0];
+    if (basis) {
+      const input = { workspace: basis.workspace, binary: basis.binary, attach: basis.attach };
+      void loadSessions(input, false).catch((error) => appendLog('warn', `Sesiones: ${errorText(error)}`));
+    }
   } catch (error) {
     appendLog('error', `Historial: ${errorText(error)}`);
     render();

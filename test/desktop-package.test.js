@@ -25,6 +25,18 @@ test('renderer y ventana Desktop conservan aislamiento estricto', async () => {
   assert.doesNotMatch(html.match(/id="auto-approve-input"[^>]*>/u)?.[0] ?? '', /\bchecked\b/u);
 });
 
+test('renderer conserva navegación y foco accesibles en sesiones', async () => {
+  const [renderer, css] = await Promise.all([
+    readFile(path.join(root, 'dist', 'desktop', 'renderer', 'app.js'), 'utf8'),
+    readFile(path.join(root, 'dist', 'desktop', 'renderer', 'app.css'), 'utf8'),
+  ]);
+  assert.match(renderer, /\(currentIndex \+ direction \+ tabs\.length\) % tabs\.length/u);
+  assert.match(renderer, /sessionFocusFallback/u);
+  assert.match(renderer, /Hay otra ejecución activa/u);
+  assert.match(renderer, /aria-describedby/u);
+  assert.match(css, /\.session-item:focus/u);
+});
+
 test('paquete Electron usa allowlist y makers multiplataforma', () => {
   const { makers, packagerConfig } = require('../forge.config.cjs');
   const ignored = (candidate) => packagerConfig.ignore.some((pattern) => pattern.test(candidate));
