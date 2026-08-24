@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Node and desktop package (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-15, ubuntu-24.04, ubuntu-24.04-arm]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Install Linux packaging tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes fakeroot rpm xvfb
+      - name: Check
+        run: npm run check
+      - name: CLI smoke
+        run: node bin/loop-agent.js --version
+      - name: Build desktop installers
+        run: npm run desktop:make
+      - name: Configure Linux Chromium sandbox
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mapfile -t sandbox_paths < <(find out -mindepth 2 -maxdepth 2 -type f -name chrome-sandbox -print)
+          test "${#sandbox_paths[@]}" -eq 1
+          sudo chown root:root "${sandbox_paths[0]}"
+          sudo chmod 4755 "${sandbox_paths[0]}"
+      - name: Desktop runtime smoke
+        if: runner.os != 'Linux'
+        run: npm run desktop:smoke
+      - name: Desktop runtime smoke (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run --auto-servernum npm run desktop:smoke

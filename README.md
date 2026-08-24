@@ -1,186 +1,150 @@
-# opencode-infinite-agent
+# OpenCode Infinite
 
-**Agente ilimitado para [opencode](https://opencode.ai): un bucle automático sobre una sesión que no se detiene hasta que la tarea esté completamente terminada.**
+Supervisor de escritorio, local y orientado a eventos para llevar sesiones de OpenCode hasta una finalización verificable. Incluye una aplicación gráfica para Windows, macOS y Linux, además del CLI `loop-agent` para automatización.
 
-La herramienta lanza (o se adjunta a) un servidor headless de opencode, crea o reanuda una sesión, y le envía mensajes de continuación en bucle hasta detectar finalización real mediante **doble señal**: el marcador `[TASK_COMPLETE]` en la respuesta del agente y/o la lista de todos de la sesión completamente marcada como completada.
+No envía mensajes cada *X* segundos. Envía exactamente un prompt, observa el stream SSE de OpenCode y solo continúa cuando coinciden dos hechos nuevos de esa sesión:
 
----
+1. existe una respuesta terminal del asistente persistida después del envío;
+2. OpenCode informa que la sesión quedó `idle`.
+
+Después evalúa el marcador de finalización y los *todos*. Si la tarea sigue incompleta, envía la siguiente continuación inmediatamente. Los temporizadores son límites de seguridad: nunca disparan mensajes.
+
+## Descargar la aplicación
+
+Los instaladores de cada versión están en [GitHub Releases](https://github.com/dorlanpabon/opencode-infinite-agent/releases):
+
+| Sistema | Arquitectura | Artefacto |
+| --- | --- | --- |
+| Windows | x64 | `OpenCode-Infinite-*-windows-x64-Setup.exe` |
+| macOS | Apple Silicon | `OpenCode-Infinite-*-macos-arm64.zip` |
+| macOS | Intel | `OpenCode-Infinite-*-macos-x64.zip` |
+| Debian/Ubuntu | x64 / ARM64 | `OpenCode-Infinite-*-linux-*.deb` |
+| Fedora/RHEL | x64 / ARM64 | `OpenCode-Infinite-*-linux-*.rpm` |
+
+Cada release incluye `SHA256SUMS.txt`. Las versiones preliminares no están firmadas ni notarizadas; Windows SmartScreen o macOS Gatekeeper pueden mostrar una advertencia.
 
 ## Requisitos
 
-- Node.js >= 18
-- opencode instalado y autenticado (`opencode auth login`). Si no está en PATH, define `OPENCODE_BIN`.
-- Permisos del proyecto configurados para ejecución headless (ver [Permisos en modo headless](#permisos-en-modo-headless)).
+- OpenCode instalado y autenticado en el equipo.
+- Para desarrollo: Node.js 22 LTS o posterior y npm.
+- El workspace debe permitir las herramientas que la tarea necesite.
 
-## Uso rápido
+La aplicación busca el binario oficial de OpenCode y también puede adjuntarse a un servidor local existente. Por seguridad, solo acepta orígenes loopback (`127.0.0.1`, `localhost` o `::1`) sin credenciales en la URL.
 
-```bash
-# 1) Tarea nueva en cualquier proyecto
-node bin/loop-agent.js --dir "D:\mi\proyecto" --prompt "Construye una API REST completa con tests"
+## Uso de escritorio
 
-# 2) Reanudar tu sesión actual (por deeplink) hasta terminarla
-node bin/loop-agent.js --deeplink "oc://renderer/server/c2lkZWNhcg/session/ses_xxxxxxxx" --dir "D:\mi\proyecto"
+1. Abre **OpenCode Infinite**.
+2. Selecciona **Nueva ejecución**.
+3. Escribe la tarea y elige el workspace.
+4. Opcionalmente define sesión, modelo, agente, límites o servidor local.
+5. Ejecuta el diagnóstico y pulsa **Iniciar supervisor**.
 
-# 3) Por ID de sesion
-node bin/loop-agent.js --session ses_fd8e5dbeeffeuDpQFM6wZ8o7cu --dir "D:\mi\proyecto"
+La interfaz muestra el ciclo del turno, estado del stream, sesión, iteración, consumo, historial y logs. Solo permite una ejecución activa por workspace y conserva el estado de forma atómica para recuperarse tras un cierre.
 
-# Recomendado en proyectos con permisos restrictivos:
-node bin/loop-agent.js --dir "D:\mi\proyecto" --prompt "..." --auto-approve --max-iterations 200
+La autoaprobación de permisos está desactivada por defecto y exige una confirmación explícita por ejecución.
+
+## Máquina de estados
+
+```text
+conectar SSE -> snapshot -> armar monitor -> POST prompt_async (una vez)
+                                      |
+                         busy / retry / partes de mensaje
+                                      |
+          respuesta terminal persistida + session.status = idle
+                                      |
+                        evaluar sentinel y todos
+                         |                    |
+                    completa              incompleta
+                         |                    |
+                      finalizar      enviar continuación
 ```
 
-### Códigos de salida
+El stream se reconecta con *backoff*. Después de una reconexión, el monitor vuelve a leer mensajes y estado para reparar eventos perdidos. Un error ambiguo del `POST` se reconcilia antes de reintentar, evitando prompts duplicados. Los límites suave y duro solo detectan un turno bloqueado; no abortan ni vuelven a enviar automáticamente.
 
-| Código | Significado |
-|--------|-------------|
-| `0`    | Tarea COMPLETADA |
-| `1`    | Error fatal |
-| `2`    | Límite de iteraciones alcanzado sin terminar |
-| `130`  | Interrumpido por el usuario (Ctrl+C) |
+## CLI
 
-## Cómo funciona
+Desde el repositorio:
 
-```
-┌────────────────────────────────────────────────────────────┐
-│ 1. Conexion (en orden):                                    │
-│    a. --attach <url> explicito                             │
-│    b. health en puerto configurado                         │
-│    c. descubrimiento de procesos opencode locales          │
-│       (TUI o sidecar de la app escritorio)                 │
-│    d. spawn dedicado: `opencode serve --port N`            │
-│       con cwd = --dir (reintento con config aislada        │
-│       si el config global es incompatible)                 │
-│ 2. Sesion:                                                 │
-│      POST /session            (modo tarea nueva)           │
-│      GET  /session/:id        (modo reanudar, valida ID)   │
-│ 3. BUCLE (hasta maxIterations):                            │
-│      POST /session/:id/prompt_async  ("continúa...")       │
-│      poll GET /session/:id/message  → respuesta nueva      │
-│      ├─ ¿[TASK_COMPLETE] en texto?  → FIN ✅               │
-│      ├─ GET /session/:id/todo       → ¿todos completed? ✅ │
-│      ├─ ¿error transitorio?         → retry con backoff    │
-│      └─ pausa delayMs y repite                             │
-│ 4. Ctrl+C → POST /session/:id/abort + reporte + exit(130)  │
-│ 5. Reporte: iteraciones, tokens, costo $, último mensaje   │
-└────────────────────────────────────────────────────────────┘
+```powershell
+npm ci
+node bin/loop-agent.js --prompt "Implementa la tarea y verifica todo" --dir "D:\proyecto"
 ```
 
-Endpoints del servidor usados: `/global/health`, `/session`, `/session/:id`, `/session/:id/message`, `/session/:id/prompt_async`, `/session/:id/todo`, `/session/:id/abort`, `/event` (SSE para auto-aprobar permisos). Especificación completa: `http://localhost:<puerto>/doc`.
+Reanudar una sesión:
 
-### Detección de finalización (doble señal)
-
-1. **Sentinel**: el prompt inicial instruye al agente a terminar su respuesta con `[TASK_COMPLETE]` (configurable) solo cuando todo esté 100% completo y verificado.
-2. **Todos**: consulta `GET /session/:id/todo`; si existen todos y todos están en estado `completed` (o `cancelled`), también se considera terminada.
-
-Con ambas señales activas basta una para detener el bucle; puedes desactivar la de todos con `--no-todos`.
-
-## Configuración
-
-Busca `.looprc.json` primero en `--dir` y luego en la raíz de esta herramienta. Ejemplo (cópialo desde `.looprc.example.json`):
-
-```json
-{
-  "port": 4567,
-  "hostname": "127.0.0.1",
-  "maxIterations": 100,
-  "delayMs": 4000,
-  "retries": 3,
-  "retryDelayMs": 4000,
-  "maxConsecutiveErrors": 4,
-  "stallTimeoutMin": 20,
-  "pollMs": 2000,
-  "sentinel": "[TASK_COMPLETE]",
-  "todoDetection": true,
-  "autoApprove": false,
-  "keepServer": false,
-  "verbose": false,
-  "model": null,
-  "agent": null,
-  "title": null
-}
+```powershell
+node bin/loop-agent.js --session ses_xxxxxxxx --dir "D:\proyecto"
+node bin/loop-agent.js --deeplink "oc://renderer/server/.../session/ses_xxxxxxxx" --dir "D:\proyecto"
 ```
 
-Variables de entorno soportadas:
+Opciones relevantes:
 
-| Variable | Descripción |
-|----------|-------------|
-| `LOOP_PORT` | Puerto por defecto del servidor headless |
-| `LOOP_SENTINEL` | Marcador de finalización alternativo |
-| `OPENCODE_BIN` | Ruta al binario opencode si no está en PATH |
-| `OPENCODE_SERVER_PASSWORD` / `OPENCODE_SERVER_USERNAME` | Basic auth si tu servidor la requiere |
-
-Precedencia: CLI > entorno > archivo > defaults.
-
-## Permisos y diálogos "Permission required"
-
-Cuando el agente necesita hacer algo sensible (editar archivos, ejecutar bash, **acceder a rutas fuera del proyecto**), opencode puede mostrar `Permission required` y esperar confirmación — lo cual congela un bucle automático. La clave `external_directory` viene en modo `"ask"` por defecto: eso causa el diálogo *"Access files outside the project directory"*.
-
-La herramienta lo resuelve con 3 capas:
-
-### Capa 1 — Pre-autorizar por configuración (recomendada)
-
-```bash
-node bin/loop-agent.js init-permissions --dir "D:\tu\proyecto"
+```text
+--max-iterations <n>       límite de continuaciones (100)
+--stall-timeout-min <m>    aviso de inactividad; se extiende si sigue busy/retry (20)
+--sentinel <texto>         marcador de finalización ([TASK_COMPLETE])
+--no-todos                 desactiva finalización por todos completos
+--attach <url>             servidor OpenCode local existente
+--no-discover              fuerza un servidor dedicado
+--auto-approve             aprueba permisos de la sesión administrada
+--keep-server              conserva el servidor dedicado al terminar
 ```
 
-Crea o fusiona el `opencode.json` del proyecto con permisos allow-all (preserva tu config existente):
+`--delay-ms` y las claves antiguas `delayMs`/`pollMs` se aceptan únicamente por compatibilidad; no controlan ni disparan continuaciones.
 
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "permission": {
-    "edit": "allow",
-    "bash": { "*": "allow" },
-    "webfetch": "allow",
-    "external_directory": { "**": "allow" }
-  }
-}
+Consulta todas las opciones con `node bin/loop-agent.js --help`. Puedes copiar `.looprc.example.json` como `.looprc.json` dentro del workspace.
+
+## Finalización
+
+Una ejecución termina correctamente al detectar cualquiera de estas señales después de un turno terminal:
+
+- el marcador exacto, por defecto `[TASK_COMPLETE]`, en la respuesta del asistente;
+- una lista no vacía de *todos* completamente terminada.
+
+También termina de forma controlada por cancelación, límite de iteraciones, límite total de la aplicación o timeout duro del turno. El estado final indica la causa.
+
+## Permisos y seguridad
+
+- El servidor administrado escucha solo en loopback.
+- Las credenciales Basic Auth nunca se envían a un host remoto.
+- La autoaprobación filtra por el ID exacto de la sesión administrada.
+- Electron usa aislamiento de contexto, sandbox, CSP estricta, navegación bloqueada y un puente IPC mínimo con validación de entradas.
+- Los logs eliminan secretos y no se guardan credenciales en el estado de ejecución.
+
+Para crear una configuración `allow-all` del proyecto debes reconocer explícitamente el riesgo:
+
+```powershell
+node bin/loop-agent.js init-permissions --confirm-unsafe --dir "D:\proyecto"
 ```
 
-Esto elimina los diálogos de ese proyecto tanto en la herramienta como en la app/TUI interactiva. Puedes afinar patrones manualmente, ej: `"external_directory": { "~/proyectos/**": "allow" }` (última regla que coincide gana).
+Esta opción reduce las barreras de OpenCode para ese workspace. Prefiere reglas específicas y revisa el `opencode.json` resultante.
 
-### Capa 2 — Auto-aprobar en vivo (`--auto-approve`)
+## Desarrollo
 
-La herramienta escucha el stream `/event` del servidor y responde automáticamente cada `permission.asked` (endpoints `POST /permission/:id/reply` nuevo, con fallback al legado por sesión). Cubre cualquier permiso no previsto en la config, sin tocar tus archivos.
-
-### Capa 3 — Recuperación ante bloqueos
-
-Si aun así una iteración se queda sin respuesta, tras `--stall-timeout-min` el bucle aborta la sesión, reintenta y te lo reporta claramente. Nunca queda colgado indefinidamente.
-
-> Nota: la app escritorio define `OPENCODE_SERVER_PASSWORD` global; los servidores que esta herramienta lanza heredan esa credencial y todas sus peticiones van autenticadas automáticamente.
-
-## Instalación global (opcional)
-
-```bash
-cd D:\xampp\htdocs\opencode_infinite_agent
-npm install -g .
-loop-agent --help
+```powershell
+npm ci
+npm run desktop:dev
+npm run check
+npm run desktop:package
+npm run desktop:smoke
+npm run desktop:make
 ```
 
-## Solución de problemas
+`npm run check` ejecuta TypeScript estricto, build, pruebas, validación del paquete npm y auditoría de dependencias. El workflow de release construye y prueba cada plataforma en su runner nativo antes de publicar los instaladores.
 
-| Problema | Solución |
-|----------|----------|
-| `No se encontro el binario "opencode"` | Define `OPENCODE_BIN` o instala opencode |
-| `El config global de opencode es invalido` | La herramienta lo resuelve sola: reintenta con una configuracion aislada temporal (`XDG_CONFIG_HOME`). Nota: en ese modo los MCPs del config global no cargan en el servidor dedicado |
-| El agente no crea archivos en tu proyecto con servidor dedicado | Asegurate de pasar `--dir` apuntando al proyecto; el servidor headless hereda ese directorio como raiz |
-| El servidor no responde tras 90s | Prueba otro puerto: `--port 4568`; revisa que no haya firewall bloqueando localhost |
-| La sesión queda esperando sin avanzar | Probablemente un permiso pendiente: usa `--auto-approve` o ajusta permisos del proyecto |
-| Respuestas vacías repetidas | Verifica autenticación del proveedor (`opencode auth login`) y prueba `--model proveedor/modelo` |
-| Quiero dejar el servidor vivo entre corridas | `--keep-server` |
+## Arquitectura
 
-## Estructura del proyecto
-
+```text
+src/agent.js                    API reutilizable del supervisor
+src/turn-monitor.js             quórum de eventos + read-repair
+src/server.js                   HTTP, SSE, servidor y permisos
+src/loop.js                     ciclo de ejecución y finalización
+src/desktop/main.ts             proceso principal Electron
+src/desktop/engine-adapter.ts   adaptador in-process al motor
+src/desktop/run-manager.ts      persistencia y exclusión por workspace
+src/desktop/renderer/           interfaz de usuario
 ```
-opencode_infinite_agent/
-├── bin/loop-agent.js      # CLI principal
-├── src/
-│   ├── config.js          # defaults + .looprc.json + env + flags
-│   ├── log.js             # logging con colores
-│   ├── server.js          # health-check, spawn serve, HTTP client, SSE
-│   ├── session.js         # crear/reanudar sesiones, prompts del protocolo
-│   ├── loop.js            # motor del bucle infinito
-│   ├── detect.js          # sentinel, todos, tokens/costo
-│   └── report.js          # reporte final
-├── .looprc.example.json   # plantilla de configuracion
-└── PROGRESS.md            # registro de avance del proyecto
-```
+
+## Licencia
+
+[MIT](LICENSE)

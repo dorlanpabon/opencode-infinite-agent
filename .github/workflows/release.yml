@@ -1,0 +1,126 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-latest, target: windows-x64 }
+          - { runner: macos-15, target: macos-arm64 }
+          - { runner: macos-15-intel, target: macos-x64 }
+          - { runner: ubuntu-24.04, target: linux-x64 }
+          - { runner: ubuntu-24.04-arm, target: linux-arm64 }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install Linux packaging tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes fakeroot rpm xvfb
+      - name: Install dependencies
+        run: npm ci
+      - name: Validate release tag
+        run: node scripts/verify-release-tag.mjs
+      - name: Check
+        run: npm run check
+      - name: Build installer
+        run: npm run desktop:make
+      - name: Configure Linux Chromium sandbox
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mapfile -t sandbox_paths < <(find out -mindepth 2 -maxdepth 2 -type f -name chrome-sandbox -print)
+          test "${#sandbox_paths[@]}" -eq 1
+          sudo chown root:root "${sandbox_paths[0]}"
+          sudo chmod 4755 "${sandbox_paths[0]}"
+      - name: Runtime smoke
+        if: runner.os != 'Linux'
+        run: npm run desktop:smoke
+      - name: Runtime smoke (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run --auto-servernum npm run desktop:smoke
+      - name: Collect release assets
+        run: node scripts/collect-release-assets.mjs
+      - name: Inspect Windows signature
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $signature = Get-AuthenticodeSignature (Get-ChildItem release-assets -Filter *.exe -File).FullName
+          if ($signature.Status -notin @('Valid', 'NotSigned')) { throw "Estado Authenticode invalido: $($signature.Status)" }
+          $signature | Format-List
+      - name: Validate macOS archive
+        if: runner.os == 'macOS'
+        run: unzip -t release-assets/*.zip
+      - name: Validate Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          dpkg-deb --info release-assets/*.deb
+          dpkg-deb --contents release-assets/*.deb >/dev/null
+          rpm -qpi release-assets/*.rpm
+          rpm -qpl release-assets/*.rpm >/dev/null
+      - name: Upload native artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: opencode-infinite-${{ matrix.target }}
+          path: release-assets/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Download native artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: opencode-infinite-*
+          path: release-assets
+          merge-multiple: true
+      - name: Verify complete release and checksums
+        run: node scripts/verify-release-assets.mjs
+      - name: Create or update prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          warning='Preview sin firma de distribución: Windows puede mostrar SmartScreen y macOS Gatekeeper. Verifica SHA256SUMS.txt. Requiere OpenCode instalado y autenticado.'
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" release-assets/* --verify-tag --title "OpenCode Infinite $GITHUB_REF_NAME" --generate-notes --notes "$warning" --prerelease --latest=false
+          fi
