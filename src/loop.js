@@ -56,7 +56,7 @@ async function exchange(req, sessionId, text, cfg, flag) {
     try {
       const st = await req('GET', '/session/status', null, { timeoutMs: 10000 });
       const info = st && (st[sessionId] || st);
-      const busy = info && (info.type === 'busy' || info.state === 'busy' || info.status === 'busy');
+      const busy = Boolean(info) && JSON.stringify(info).toLowerCase().includes('busy');
       if (busy && Date.now() < hardDeadline) {
         if (log.isVerbose()) log.debug('sesion busy: extendiendo espera del turno');
         deadline = Date.now() + cfg.stallTimeoutMs;
@@ -102,9 +102,9 @@ async function runLoop({ req, sessionId, cfg, firstPrompt, flag, log }) {
           if (e instanceof LoopAborted || flag.aborted) throw new LoopAborted();
           consecutiveErrors++;
           log.warn(`Fallo en el intercambio (intento ${attempt}/${cfg.retries + 1}, consecutivos: ${consecutiveErrors}): ${e.message}`);
-          if (e instanceof LoopStalled || consecutiveErrors >= cfg.maxConsecutiveErrors) {
+          if (consecutiveErrors >= cfg.maxConsecutiveErrors) {
             status = 'error';
-            reason = e instanceof LoopStalled ? e.message : `${consecutiveErrors} fallos consecutivos. Ultimo: ${e.message}`;
+            reason = `${consecutiveErrors} fallos consecutivos. Ultimo: ${e.message}`;
             break;
           }
           await sleepAbortable(cfg.retryDelayMs, flag);
