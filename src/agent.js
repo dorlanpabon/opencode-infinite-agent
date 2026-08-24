@@ -61,7 +61,12 @@ async function executeAgent(input, options = {}) {
   signal.addEventListener('abort', abort, { once: true });
 
   try {
-    handle = await server.ensureServer(cfg, logger);
+    if (input.exclusiveServer && !cfg.attach) {
+      cfg.discover = false;
+      cfg.port = await server.findAvailableLoopbackPort();
+      cfg.base = `http://${cfg.hostname}:${cfg.port}`;
+    }
+    handle = await server.ensureServer(cfg, logger, { signal });
     req = (method, pathname, body, requestOptions) => server.request(handle.base, method, pathname, body, requestOptions);
     if (options.onTransport) options.onTransport('connecting');
     eventStream = server.startEventStream({ base: handle.base, debug: logger.debug });
@@ -99,6 +104,7 @@ async function executeAgent(input, options = {}) {
       log: logger,
       eventStream,
       onState: options.onState,
+      resumeExisting: !input.prompt,
     });
     return { ...result, sessionId: session.id, serverBase: handle.base, ownedServer: handle.owned };
   } finally {

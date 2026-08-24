@@ -102,15 +102,17 @@ function loadConfig(args = {}) {
   if (args.eventConnectTimeoutMs != null) cfg.eventConnectTimeoutMs = num(args.eventConnectTimeoutMs, cfg.eventConnectTimeoutMs);
   if (args.pollMs != null) cfg.pollMs = num(args.pollMs, cfg.pollMs);
   if (args.sentinel != null) cfg.sentinel = args.sentinel;
-  if (args.model != null) cfg.model = args.model;
-  if (args.agent != null) cfg.agent = args.agent;
-  if (args.title != null) cfg.title = args.title;
-  if (args.attach != null) cfg.attach = normalizeLoopbackUrl(args.attach);
-  if (args.noTodos) cfg.todoDetection = false;
-  if (args.autoApprove) cfg.autoApprove = true;
-  if (args.noDiscover) cfg.discover = false;
-  if (args.keepServer) cfg.keepServer = true;
-  if (args.verbose) cfg.verbose = true;
+  if (Object.prototype.hasOwnProperty.call(args, 'model')) cfg.model = args.model || null;
+  if (Object.prototype.hasOwnProperty.call(args, 'agent')) cfg.agent = args.agent || null;
+  if (Object.prototype.hasOwnProperty.call(args, 'title')) cfg.title = args.title || null;
+  if (Object.prototype.hasOwnProperty.call(args, 'attach')) {
+    cfg.attach = args.attach ? normalizeLoopbackUrl(args.attach) : null;
+  }
+  if (args.noTodos != null) cfg.todoDetection = !Boolean(args.noTodos);
+  if (args.autoApprove != null) cfg.autoApprove = Boolean(args.autoApprove);
+  if (args.noDiscover != null) cfg.discover = !Boolean(args.noDiscover);
+  if (args.keepServer != null) cfg.keepServer = Boolean(args.keepServer);
+  if (args.verbose != null) cfg.verbose = Boolean(args.verbose);
 
   cfg.errorGraceMs = num(cfg.errorGraceMs, DEFAULTS.errorGraceMs);
   cfg.eventConnectTimeoutMs = num(cfg.eventConnectTimeoutMs, DEFAULTS.eventConnectTimeoutMs);

@@ -2,6 +2,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execSync, spawn } = require('child_process');
+const { createServer } = require('net');
 
 function authHeaders(base) {
   if (!base) throw new Error('authHeaders requiere el origen base');
@@ -65,6 +66,36 @@ async function health(base) {
   } catch {
     return null;
   }
+}
+
+function findAvailableLoopbackPort() {
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.unref();
+    probe.once('error', reject);
+    probe.listen({ host: '127.0.0.1', port: 0, exclusive: true }, () => {
+      const address = probe.address();
+      if (!address || typeof address === 'string') {
+        probe.close(() => reject(new Error('No se pudo reservar un puerto loopback')));
+        return;
+      }
+      probe.close((error) => error ? reject(error) : resolve(address.port));
+    });
+  });
+}
+
+function waitWithSignal(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal && signal.aborted) return resolve(false);
+    const timer = setTimeout(() => finish(true), ms);
+    const onAbort = () => finish(false);
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+    function finish(completed) {
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', onAbort);
+      resolve(completed);
+    }
+  });
 }
 
 function findBinary(explicit) {
@@ -204,7 +235,8 @@ function discoverLocalServerPorts() {
   return ports;
 }
 
-async function ensureServer(cfg, log) {
+async function ensureServer(cfg, log, { signal = null } = {}) {
+  if (signal && signal.aborted) throw new Error('Inicio de servidor interrumpido');
   if (cfg.attach) {
     const version = await health(cfg.attach);
     if (!version) throw new Error(`No se pudo adjuntar a ${cfg.attach} (sin respuesta o credenciales incorrectas). Define OPENCODE_SERVER_PASSWORD si el servidor usa basic auth.`);
@@ -241,6 +273,11 @@ async function ensureServer(cfg, log) {
     const deadline = Date.now() + 90 * 1000;
     let started = false;
     while (Date.now() < deadline) {
+      if (signal && signal.aborted) {
+        await killTree(proc);
+        if (attempt.isolatedDir) removeIsolatedConfigDir(attempt.isolatedDir);
+        throw new Error('Inicio de servidor interrumpido');
+      }
       if (proc.exitCode !== null) break;
       const version = await health(cfg.base);
       if (version) {
@@ -251,7 +288,11 @@ async function ensureServer(cfg, log) {
         if (attempt.isolatedDir) proc.once('exit', () => removeIsolatedConfigDir(attempt.isolatedDir));
         return { base: cfg.base, owned: true, proc, isolatedDir: attempt.isolatedDir };
       }
-      await new Promise((r) => setTimeout(r, 700));
+      if (!(await waitWithSignal(700, signal))) {
+        await killTree(proc);
+        if (attempt.isolatedDir) removeIsolatedConfigDir(attempt.isolatedDir);
+        throw new Error('Inicio de servidor interrumpido');
+      }
     }
 
     const errTail = getStderr();
@@ -441,14 +482,10 @@ function startPermissionApprover({
   const handled = new Set();
   const inFlight = new Set();
 
-  const unsubscribe = eventStream.subscribe(async (raw) => {
-    const event = unwrapEvent(raw);
-    if (!event || event.type !== 'permission.asked') return;
-    const payload = event.properties || event.data || {};
+  async function respond(payload) {
     const sid = payload.sessionID || payload.sessionId;
     const pid = payload.id || payload.requestID;
     if (sid !== sessionId || !pid || handled.has(pid) || inFlight.has(pid)) return;
-
     inFlight.add(pid);
     let via = null;
     try {
@@ -469,14 +506,47 @@ function startPermissionApprover({
     } else if (debug) {
       debug(`permiso ${pid}: sin respuesta exitosa`);
     }
-  });
+  }
 
-  return { abort: unsubscribe };
+  function schedule(payload) {
+    void respond(payload).catch((error) => {
+      if (debug) debug(`auto-approve fallo: ${error.message}`);
+    });
+  }
+
+  async function reconcilePending() {
+    let pending;
+    try {
+      pending = await requestFn(base, 'GET', '/permission', null, { timeoutMs: 10000 });
+    } catch (error) {
+      if (debug) debug(`No se pudieron reconciliar permisos pendientes: ${error.message}`);
+      return;
+    }
+    const requests = Array.isArray(pending) ? pending
+      : pending && Array.isArray(pending.permissions) ? pending.permissions : [];
+    await Promise.all(requests.map((payload) => respond(payload)));
+  }
+
+  const unsubscribe = eventStream.subscribe((raw) => {
+    const event = unwrapEvent(raw);
+    if (!event) return;
+    if (event.type === 'server.connected') {
+      void reconcilePending();
+      return;
+    }
+    if (event.type !== 'permission.asked') return;
+    schedule(event.properties || event.data || {});
+  });
+  void reconcilePending();
+
+  return { abort: unsubscribe, reconcile: reconcilePending };
 }
 
 module.exports = {
   request,
   health,
+  findAvailableLoopbackPort,
+  waitWithSignal,
   findBinary,
   ensureServer,
   stopServer,

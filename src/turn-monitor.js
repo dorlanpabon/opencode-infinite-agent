@@ -53,10 +53,11 @@ function terminalMessageIds(messages) {
     .map((message) => message.info.id));
 }
 
-function newestTerminal(messages, knownIds) {
+function newestTerminal(messages, knownIds, expectedParentId = null) {
   const known = knownIds instanceof Set ? knownIds : new Set(knownIds || []);
   const candidates = (Array.isArray(messages) ? messages : [])
-    .filter((message) => isTerminalAssistant(message) && !known.has(message.info.id));
+    .filter((message) => isTerminalAssistant(message) && !known.has(message.info.id)
+      && (!expectedParentId || message.info.parentID === expectedParentId));
   return candidates.length ? candidates[candidates.length - 1] : null;
 }
 
@@ -140,6 +141,7 @@ class SessionTurnMonitor {
 
   waitForTerminal({
     knownMessageIds,
+    expectedParentId = null,
     timeoutMs,
     hardTimeoutMs,
     signal,
@@ -158,6 +160,7 @@ class SessionTurnMonitor {
 
     const active = {
       knownIds: knownMessageIds instanceof Set ? new Set(knownMessageIds) : new Set(knownMessageIds || []),
+      expectedParentId,
       resolve: resolvePromise,
       reject: rejectPromise,
       promise,
@@ -195,7 +198,7 @@ class SessionTurnMonitor {
     if (!event) return;
 
     if (event.type === 'server.connected') {
-      void this.reconcile();
+      this.requestReconcile('server.connected');
       return;
     }
 
@@ -208,7 +211,7 @@ class SessionTurnMonitor {
         this.active.statusType = type;
         if (type === 'idle') {
           this.active.idleSeen = true;
-          void this.reconcile();
+          this.requestReconcile('session.status idle');
         } else if (type === 'busy' || type === 'retry') {
           this.active.sawBusy = true;
           this.active.idleSeen = false;
@@ -219,14 +222,14 @@ class SessionTurnMonitor {
       case 'session.idle':
         this.active.statusType = 'idle';
         this.active.idleSeen = true;
-        void this.reconcile();
+        this.requestReconcile('session.idle');
         break;
       case 'session.error':
         this.recordSessionError(props.error || props);
         break;
       case 'message.updated':
         this.touch();
-        void this.reconcile();
+        this.requestReconcile('message.updated');
         break;
       case 'message.part.updated':
       case 'message.part.delta':
@@ -243,8 +246,19 @@ class SessionTurnMonitor {
     active.pendingError = { detail, dueAt: Date.now() + this.errorGraceMs };
     if (active.errorTimer) clearTimeout(active.errorTimer);
     active.errorTimer = setTimeout(() => {
-      if (this.active === active && !active.settled) void this.reconcile();
+      if (this.active === active && !active.settled) this.requestReconcile('session.error grace');
     }, this.errorGraceMs);
+  }
+
+  requestReconcile(source) {
+    void this.reconcile().catch((error) => {
+      const active = this.active;
+      if (!active || active.settled) return;
+      if (this.log && typeof this.log.debug === 'function') {
+        this.log.debug(`Read-repair ${source} fallo: ${error.message}`);
+      }
+      this.armWatchdog(Math.min(active.softMs, Math.max(1, active.hardDeadline - Date.now())));
+    });
   }
 
   touch() {
@@ -294,11 +308,14 @@ class SessionTurnMonitor {
         const snapshot = await this.snapshot();
         if (this.active !== active || active.settled) return null;
 
-        const terminal = newestTerminal(snapshot.messages, active.knownIds);
+        const terminal = newestTerminal(snapshot.messages, active.knownIds, active.expectedParentId);
         const type = snapshot.status.type || 'unknown';
         active.statusType = type;
         if (type === 'idle' && (terminal || active.sawBusy || active.pendingError)) active.idleSeen = true;
-        else if (type === 'busy' || type === 'retry') active.sawBusy = true;
+        else if (type === 'busy' || type === 'retry') {
+          active.sawBusy = true;
+          active.idleSeen = false;
+        }
 
         if (terminal && active.idleSeen) {
           this.resolveActive(terminal);

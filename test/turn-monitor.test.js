@@ -19,26 +19,30 @@ function fakeEventStream() {
 }
 
 function backend(sessionId) {
-  const state = { messages: [], status: {} };
+  const state = { messages: [], status: {}, failMessages: false };
   const calls = [];
   return {
     state,
     calls,
     async req(method, path) {
       calls.push({ method, path });
-      if (path === `/session/${sessionId}/message`) return state.messages;
+      if (path === `/session/${sessionId}/message`) {
+        if (state.failMessages) throw new Error('fallo transitorio');
+        return state.messages;
+      }
       if (path === '/session/status') return state.status;
       throw new Error(`Ruta inesperada: ${method} ${path}`);
     },
   };
 }
 
-function assistant(id, sessionId, { completed = true, error = null, text = 'ok' } = {}) {
+function assistant(id, sessionId, { completed = true, error = null, text = 'ok', parentID = null } = {}) {
   return {
     info: {
       id,
       sessionID: sessionId,
       role: 'assistant',
+      ...(parentID ? { parentID } : {}),
       time: { created: 1, ...(completed ? { completed: 2 } : {}) },
       ...(error ? { error } : {}),
     },
@@ -210,5 +214,71 @@ test('busy supera varios watchdog suaves sin convertirse en reenvio', async () =
   stream.emit({ type: 'session.status', properties: { sessionID: sessionId, status: { type: 'idle' } } });
 
   assert.equal((await ticket.promise).info.id, 'msg_long_done');
+  monitor.close();
+});
+
+test('correlaciona el terminal con el user message exacto', async () => {
+  const sessionId = 'ses_parent';
+  const stream = fakeEventStream();
+  const api = backend(sessionId);
+  const monitor = createSessionTurnMonitor({ req: api.req, eventStream: stream, sessionId });
+  const ticket = monitor.waitForTerminal({
+    knownMessageIds: [], expectedParentId: 'msg_ours', timeoutMs: 100, hardTimeoutMs: 500,
+  });
+
+  api.state.messages = [assistant('msg_other_reply', sessionId, { parentID: 'msg_other' })];
+  api.state.status = {};
+  stream.emit({ type: 'session.idle', properties: { sessionID: sessionId } });
+  await assertPending(ticket.promise);
+
+  const ours = assistant('msg_our_reply', sessionId, { parentID: 'msg_ours' });
+  api.state.messages.push(ours);
+  stream.emit({ type: 'message.updated', properties: { info: ours.info } });
+  stream.emit({ type: 'session.idle', properties: { sessionID: sessionId } });
+  assert.equal((await ticket.promise).info.id, 'msg_our_reply');
+  monitor.close();
+});
+
+test('fallo transitorio de read-repair SSE se contiene y recupera', async () => {
+  const sessionId = 'ses_read_repair';
+  const stream = fakeEventStream();
+  const api = backend(sessionId);
+  const logs = [];
+  const monitor = createSessionTurnMonitor({
+    req: api.req, eventStream: stream, sessionId, log: { debug: (line) => logs.push(line) },
+  });
+  const ticket = monitor.waitForTerminal({
+    knownMessageIds: [], expectedParentId: 'msg_user', timeoutMs: 100, hardTimeoutMs: 500,
+  });
+  api.state.failMessages = true;
+  stream.emit({ type: 'server.connected' });
+  await delay(10);
+  assert.ok(logs.some((line) => /fallo transitorio/.test(line)));
+  await assertPending(ticket.promise);
+
+  api.state.failMessages = false;
+  api.state.messages = [assistant('msg_repaired', sessionId, { parentID: 'msg_user' })];
+  api.state.status = {};
+  stream.emit({ type: 'server.connected' });
+  assert.equal((await ticket.promise).info.id, 'msg_repaired');
+  monitor.close();
+});
+
+test('snapshot busy invalida un idle anterior', async () => {
+  const sessionId = 'ses_idle_race';
+  const stream = fakeEventStream();
+  const api = backend(sessionId);
+  const terminal = assistant('msg_terminal', sessionId, { parentID: 'msg_user' });
+  api.state.messages = [terminal];
+  api.state.status = { [sessionId]: { type: 'busy' } };
+  const monitor = createSessionTurnMonitor({ req: api.req, eventStream: stream, sessionId });
+  const ticket = monitor.waitForTerminal({
+    knownMessageIds: [], expectedParentId: 'msg_user', timeoutMs: 100, hardTimeoutMs: 500,
+  });
+  stream.emit({ type: 'session.idle', properties: { sessionID: sessionId } });
+  await assertPending(ticket.promise);
+  api.state.status = {};
+  stream.emit({ type: 'session.idle', properties: { sessionID: sessionId } });
+  assert.equal((await ticket.promise).info.id, 'msg_terminal');
   monitor.close();
 });

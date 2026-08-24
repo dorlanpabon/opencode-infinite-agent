@@ -255,7 +255,9 @@ async function main() {
   if (process.platform === 'win32') process.on('SIGBREAK', onSignal);
 
   // ejecuta el bucle infinito
-  const result = await runLoop({ req, sessionId: session.id, cfg, firstPrompt, flag, log, eventStream });
+  const result = await runLoop({
+    req, sessionId: session.id, cfg, firstPrompt, flag, log, eventStream, resumeExisting: !args.prompt,
+  });
 
   if (approverCtl) approverCtl.abort();
   eventStream.abort();

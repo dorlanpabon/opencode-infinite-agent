@@ -24,6 +24,15 @@ function fakeEventStream() {
   };
 }
 
+async function waitFor(predicate, timeoutMs = 250) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+  throw new Error('waitFor timeout');
+}
+
 test('config aislada usa directorios privados unicos y limpieza acotada', () => {
   const first = isolatedConfigDir();
   const second = isolatedConfigDir();
@@ -84,7 +93,7 @@ test('auto-approve filtra exactamente permission.asked y sessionID', async () =>
     base: 'http://127.0.0.1:1',
     eventStream: stream,
     sessionId: 'ses_target',
-    requestFn: async (...args) => { calls.push(args); return true; },
+    requestFn: async (...args) => { calls.push(args); return args[1] === 'GET' ? [] : true; },
     onResponseSent: (...args) => sent.push(args),
   });
 
@@ -92,7 +101,7 @@ test('auto-approve filtra exactamente permission.asked y sessionID', async () =>
   await stream.emit({ type: 'permission.v2.asked', properties: { sessionID: 'ses_target', id: 'per_v2' } });
   await stream.emit({ type: 'permission.asked', properties: { sessionID: 'ses_other', id: 'per_other' } });
   await stream.emit({ type: 'permission.asked', properties: { id: 'per_missing_session' } });
-  assert.equal(calls.length, 0);
+  assert.equal(calls.filter((call) => call[1] === 'POST').length, 0);
 
   const event = {
     type: 'permission.asked',
@@ -101,8 +110,9 @@ test('auto-approve filtra exactamente permission.asked y sessionID', async () =>
   await stream.emit(event);
   await stream.emit(event);
 
-  assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0].slice(1, 4), [
+  await waitFor(() => calls.filter((call) => call[1] === 'POST').length === 1);
+  const posts = calls.filter((call) => call[1] === 'POST');
+  assert.deepEqual(posts[0].slice(1, 4), [
     'POST',
     '/permission/per_exact/reply',
     { reply: 'once' },
@@ -120,6 +130,7 @@ test('auto-approve usa fallback legado con los mismos IDs exactos', async () => 
     sessionId: 'ses_target',
     requestFn: async (...args) => {
       calls.push(args);
+      if (args[1] === 'GET') return [];
       if (args[2] === '/permission/per_fallback/reply') throw new Error('404');
       return true;
     },
@@ -130,11 +141,33 @@ test('auto-approve usa fallback legado con los mismos IDs exactos', async () => 
     properties: { sessionID: 'ses_target', requestID: 'per_fallback', permission: 'edit' },
   });
 
-  assert.equal(calls.length, 2);
-  assert.deepEqual(calls[1].slice(1, 4), [
+  await waitFor(() => calls.filter((call) => call[1] === 'POST').length === 2);
+  const posts = calls.filter((call) => call[1] === 'POST');
+  assert.deepEqual(posts[1].slice(1, 4), [
     'POST',
     '/session/ses_target/permissions/per_fallback',
     { response: 'once' },
   ]);
+  approver.abort();
+});
+
+test('auto-approve reconcilia permisos pendientes de la sesion al conectar', async () => {
+  const stream = fakeEventStream();
+  const calls = [];
+  const approver = startPermissionApprover({
+    base: 'http://127.0.0.1:1',
+    eventStream: stream,
+    sessionId: 'ses_target',
+    requestFn: async (...args) => {
+      calls.push(args);
+      if (args[1] === 'GET') return [
+        { sessionID: 'ses_other', id: 'per_other' },
+        { sessionID: 'ses_target', id: 'per_pending', permission: 'bash' },
+      ];
+      return true;
+    },
+  });
+  await waitFor(() => calls.some((call) => call[2] === '/permission/per_pending/reply'));
+  assert.equal(calls.some((call) => call[2] === '/permission/per_other/reply'), false);
   approver.abort();
 });
