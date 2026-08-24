@@ -39,6 +39,7 @@ async function exchange(req, sessionId, text, cfg, flag) {
   await req('POST', `/session/${sessionId}/prompt_async`, buildMessageBody(cfg, text), { timeoutMs: 15000 });
 
   const deadline = Date.now() + cfg.stallTimeoutMs;
+  const hardDeadline = Date.now() + 3 * 60 * 60 * 1000;
   while (Date.now() < deadline) {
     if (flag.aborted) throw new LoopAborted();
     await sleepAbortable(cfg.pollMs, flag);
@@ -50,6 +51,17 @@ async function exchange(req, sessionId, text, cfg, flag) {
       ((m.info.time && m.info.time.completed) || m.info.error)
     );
     if (reply) return reply;
+    // si la sesion sigue BUSY el turno legitimo sigue corriendo (ej: render
+    // largo en AWS): extender la espera en vez de declarar stall
+    try {
+      const st = await req('GET', '/session/status', null, { timeoutMs: 10000 });
+      const info = st && (st[sessionId] || st);
+      const busy = info && (info.type === 'busy' || info.state === 'busy' || info.status === 'busy');
+      if (busy && Date.now() < hardDeadline) {
+        if (log.isVerbose()) log.debug('sesion busy: extendiendo espera del turno');
+        deadline = Date.now() + cfg.stallTimeoutMs;
+      }
+    } catch {}
   }
   try { await req('POST', `/session/${sessionId}/abort`, {}); } catch {}
   throw new LoopStalled(`Sin respuesta del agente tras ${cfg.stallTimeoutMin} min. Causa probable: dialogo de permiso pendiente. Soluciones: --auto-approve o ejecutar antes "loop-agent init-permissions --dir <proyecto>"`);
