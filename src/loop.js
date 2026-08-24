@@ -1,12 +1,15 @@
-const { randomBytes } = require('crypto');
+const { randomUUID } = require('node:crypto');
 const { assistantText, hasSentinel, todosDone, excerpt, messageError, usageOf } = require('./detect');
 const { continuationPrompt } = require('./session');
 const {
   createSessionTurnMonitor,
   terminalMessageIds,
+  messageIds,
+  unresolvedTurnParentIds,
   TurnMonitorTimeout,
   SessionTurnError,
   TurnMonitorAborted,
+  TurnCorrelationError,
   isTerminalAssistant,
 } = require('./turn-monitor');
 
@@ -14,6 +17,7 @@ class LoopAborted extends Error {
   constructor() { super('Interrumpido por el usuario (Ctrl+C)'); }
 }
 class LoopStalled extends Error {}
+class UnsafeSessionHistoryError extends Error {}
 
 // Backoff abortable usado solo para fallos confirmados de transporte/HTTP.
 function sleepAbortable(ms, flag) {
@@ -29,26 +33,14 @@ function sleepAbortable(ms, flag) {
   });
 }
 
-// construye el body de prompt_async con model/agent opcionales
-const MESSAGE_ID_CHARS = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
-let lastMessageTimestamp = 0;
-let messageCounter = 0;
-
-function createMessageId(now = Date.now()) {
-  if (now !== lastMessageTimestamp) {
-    lastMessageTimestamp = now;
-    messageCounter = 0;
-  }
-  messageCounter += 1;
-  const current = BigInt.asUintN(48, BigInt(now) * 0x1000n + BigInt(messageCounter));
-  const time = current.toString(16).padStart(12, '0');
-  const entropy = [...randomBytes(14)].map((byte) => MESSAGE_ID_CHARS[byte % MESSAGE_ID_CHARS.length]).join('');
-  return `msg_${time}${entropy}`;
-}
-
-function buildMessageBody(cfg, text, messageId = null) {
-  const body = { parts: [{ type: 'text', text }] };
-  if (messageId) body.messageID = messageId;
+function buildMessageBody(cfg, text) {
+  const marker = `<!-- opencode-infinite-agent-turn:${randomUUID()} -->`;
+  const body = {
+    parts: [
+      { type: 'text', text },
+      { type: 'text', text: marker, synthetic: true, ignored: true },
+    ],
+  };
   if (cfg.model && cfg.model.includes('/')) {
     const slash = cfg.model.indexOf('/');
     body.model = {
@@ -58,6 +50,16 @@ function buildMessageBody(cfg, text, messageId = null) {
   }
   if (cfg.agent) body.agent = cfg.agent;
   return body;
+}
+
+function hasUnsafeWrappedHistory(messages, now = Date.now()) {
+  const current = BigInt.asUintN(48, BigInt(now) * 0x1000n).toString(16).padStart(12, '0');
+  return (Array.isArray(messages) ? messages : []).some((message) => {
+    const info = message && message.info;
+    const match = info && typeof info.id === 'string' && /^msg_([0-9a-f]{12})/u.exec(info.id);
+    const created = info && info.time && Number(info.time.created);
+    return Boolean(match && Number.isFinite(created) && created < now - 60000 && match[1] > current);
+  });
 }
 
 function isRunningStatus(status) {
@@ -71,61 +73,7 @@ function isConfirmedPromptRejection(error) {
 
 // Arma el monitor antes de prompt_async. Los eventos solo despiertan una
 // reconciliacion; el siguiente prompt requiere assistant terminal persistido e idle.
-async function exchange(req, sessionId, text, cfg, flag, monitor, log) {
-  if (flag.aborted) throw new LoopAborted();
-  await monitor.ready(cfg.eventConnectTimeoutMs);
-  if (flag.aborted) throw new LoopAborted();
-  const before = await monitor.snapshot();
-  const known = terminalMessageIds(before.messages);
-  if (isRunningStatus(before.status)) {
-    const last = before.messages[before.messages.length - 1];
-    if (last && last.info && last.info.role === 'assistant' &&
-      ((last.info.time && last.info.time.completed) || last.info.error)) {
-      // Puede ser el conocido desfase stale-busy de OpenCode: permitir que el
-      // idle posterior cierre este terminal ya persistido.
-      known.delete(last.info.id);
-    }
-  }
-  const running = isRunningStatus(before.status);
-  const messageId = running ? null : createMessageId();
-  const ticket = monitor.waitForTerminal({
-    knownMessageIds: known,
-    expectedParentId: messageId,
-    timeoutMs: cfg.stallTimeoutMs,
-    hardTimeoutMs: cfg.turnHardTimeoutMs,
-    signal: flag.signal,
-  });
-
-  // Al reanudar una sesion que aun trabaja, no inyectar otro mensaje. Esperar
-  // el terminal del turno existente y evaluarlo primero.
-  if (running) {
-    log.info(`Sesion ${before.status.type}: esperando que termine el turno activo`);
-    void ticket.reconcile().catch((error) => log.debug(`Reconciliacion: ${error.message}`));
-    try {
-      return await ticket.promise;
-    } catch (error) {
-      if (error instanceof TurnMonitorAborted || flag.aborted) throw new LoopAborted();
-      if (error instanceof TurnMonitorTimeout) throw new LoopStalled(error.message);
-      throw error;
-    }
-  }
-
-  try {
-    // prompt_async evita mantener una respuesta HTTP abierta durante horas.
-    await req('POST', `/session/${sessionId}/prompt_async`, buildMessageBody(cfg, text, messageId), { timeoutMs: 15000 });
-  } catch (error) {
-    // Solo un rechazo 4xx no ambiguo permite reintentar. Timeouts, 408/425/429
-    // y 5xx pueden ocurrir despues de persistir el mensaje: esperamos la
-    // respuesta correlacionada por parentID para no duplicar el prompt.
-    if (isConfirmedPromptRejection(error)) {
-      ticket.cancel(error);
-      try { await ticket.promise; } catch {}
-      throw error;
-    }
-    log.warn(`Resultado ambiguo al enviar prompt; reconciliando sin reenviar: ${error.message}`);
-  }
-
-  void ticket.reconcile().catch((error) => log.debug(`Reconciliacion: ${error.message}`));
+async function awaitTicket(ticket, flag) {
   try {
     return await ticket.promise;
   } catch (error) {
@@ -135,9 +83,105 @@ async function exchange(req, sessionId, text, cfg, flag, monitor, log) {
   }
 }
 
+async function exchange(req, sessionId, text, cfg, flag, monitor, log, { adoptRunning = false } = {}) {
+  let mayAdoptRunning = Boolean(adoptRunning);
+  for (;;) {
+    if (flag.aborted) throw new LoopAborted();
+    await monitor.ready(cfg.eventConnectTimeoutMs);
+    if (flag.aborted) throw new LoopAborted();
+    const before = await monitor.snapshot();
+
+    if (hasUnsafeWrappedHistory(before.messages)) {
+      throw new UnsafeSessionHistoryError(
+        'La sesion mezcla historial anterior al wrap de IDs; crea una sesion nueva para evitar respuestas duplicadas'
+      );
+    }
+
+    const baselineIds = messageIds(before.messages);
+    const unresolvedParents = unresolvedTurnParentIds(before.messages);
+    if (unresolvedParents.size > 1) {
+      throw new TurnCorrelationError('La sesion tiene multiples turnos sin resolver; se detuvo para evitar duplicados');
+    }
+    let parentId = unresolvedParents.size === 1 ? [...unresolvedParents][0] : null;
+    let staleBusyTerminal = null;
+    if (isRunningStatus(before.status) && !parentId) {
+      staleBusyTerminal = [...before.messages].reverse()
+        .find((message) => isTerminalAssistant(message) && message.info.parentID);
+      if (staleBusyTerminal) parentId = staleBusyTerminal.info.parentID;
+    }
+    if (isRunningStatus(before.status) || parentId) {
+      if (!parentId) throw new TurnCorrelationError(
+        'La sesion esta activa pero no tiene un unico turno correlacionable'
+      );
+      const known = terminalMessageIds(before.messages);
+      const hasIncomplete = before.messages.some((message) => message && message.info &&
+        message.info.role === 'assistant' && message.info.parentID === parentId && !isTerminalAssistant(message));
+      if (!hasIncomplete) {
+        const staleTerminal = staleBusyTerminal || [...before.messages].reverse()
+          .find((message) => isTerminalAssistant(message) && message.info.parentID === parentId);
+        if (staleTerminal) known.delete(staleTerminal.info.id);
+      }
+      const ticket = monitor.waitForTerminal({
+        knownMessageIds: known,
+        expectedParentId: parentId,
+        timeoutMs: cfg.stallTimeoutMs,
+        hardTimeoutMs: cfg.turnHardTimeoutMs,
+        signal: flag.signal,
+      });
+      log.info(`Sesion ${before.status.type}: esperando el turno sin resolver ${parentId}`);
+      void ticket.reconcile().catch((error) => log.debug(`Reconciliacion: ${error.message}`));
+      const terminal = await awaitTicket(ticket, flag);
+      if (mayAdoptRunning) {
+        if (staleBusyTerminal) {
+          const after = await monitor.snapshot();
+          const freshTerminal = [...after.messages].reverse()
+            .find((message) => isTerminalAssistant(message) && !baselineIds.has(message.info.id));
+          if (freshTerminal) return freshTerminal;
+        }
+        return terminal;
+      }
+      mayAdoptRunning = false;
+      continue;
+    }
+
+    if (!before.status || before.status.type === 'unknown') {
+      throw new Error('No se pudo confirmar que la sesion esta idle; no se envio otro prompt');
+    }
+
+    const body = buildMessageBody(cfg, text);
+    const ticket = monitor.waitForTerminal({
+      knownMessageIds: baselineIds,
+      expectedUserParts: body.parts,
+      timeoutMs: cfg.stallTimeoutMs,
+      hardTimeoutMs: cfg.turnHardTimeoutMs,
+      signal: flag.signal,
+    });
+
+    try {
+      // prompt_async evita mantener una respuesta HTTP abierta durante horas.
+      // El servidor asigna el user messageID. El nonce criptografico persistido
+      // en las partes permite descubrirlo sin generar IDs de cliente.
+      await req('POST', `/session/${sessionId}/prompt_async`, body, { timeoutMs: 15000 });
+    } catch (error) {
+      // Solo un rechazo 4xx no ambiguo permite reintentar. Timeouts, 408/425/429
+      // y 5xx pueden ocurrir despues de persistir el mensaje.
+      if (isConfirmedPromptRejection(error)) {
+        ticket.cancel(error);
+        try { await ticket.promise; } catch {}
+        throw error;
+      }
+      log.warn(`Resultado ambiguo al enviar prompt; reconciliando sin reenviar: ${error.message}`);
+    }
+
+    void ticket.reconcile().catch((error) => log.debug(`Reconciliacion: ${error.message}`));
+    return await awaitTicket(ticket, flag);
+  }
+}
+
 async function existingCompletion(req, sessionId, cfg, monitor, log) {
   const snapshot = await monitor.snapshot();
-  if (isRunningStatus(snapshot.status)) return null;
+  if (!snapshot.status || snapshot.status.type !== 'idle' ||
+    unresolvedTurnParentIds(snapshot.messages).size > 0) return null;
   const terminal = [...snapshot.messages].reverse().find(isTerminalAssistant);
   if (!terminal) return null;
   const text = assistantText(terminal.parts);
@@ -188,7 +232,7 @@ async function runLoop({ req, sessionId, cfg, firstPrompt, flag, log, eventStrea
         return { status: 'complete', reason: existing.reason, state };
       }
     }
-    for (let i = 1; i <= cfg.maxIterations; i++) {
+    for (let i = 1; i <= cfg.maxIterations;) {
       if (flag.aborted) { status = 'aborted'; reason = 'Interrumpido por el usuario'; break; }
 
       log.banner(`--- Iteracion ${i}/${cfg.maxIterations} ---`);
@@ -201,15 +245,19 @@ async function runLoop({ req, sessionId, cfg, firstPrompt, flag, log, eventStrea
       while (!reply && attempt <= cfg.retries) {
         attempt++;
         try {
-          reply = await exchange(req, sessionId, prompt, cfg, flag, monitor, log);
-          consecutiveErrors = 0;
+          reply = await exchange(req, sessionId, prompt, cfg, flag, monitor, log, {
+            adoptRunning: resumeExisting && i === 1,
+          });
         } catch (e) {
           if (e instanceof LoopAborted || flag.aborted) throw new LoopAborted();
           consecutiveErrors++;
           log.warn(`Fallo en el intercambio (intento ${attempt}/${cfg.retries + 1}, consecutivos: ${consecutiveErrors}): ${e.message}`);
-          if (e instanceof LoopStalled || e instanceof SessionTurnError || consecutiveErrors >= cfg.maxConsecutiveErrors) {
+          if (e instanceof LoopStalled || e instanceof SessionTurnError ||
+            e instanceof TurnCorrelationError || e instanceof UnsafeSessionHistoryError ||
+            consecutiveErrors >= cfg.maxConsecutiveErrors) {
             status = 'error';
-            reason = e instanceof LoopStalled || e instanceof SessionTurnError
+            reason = e instanceof LoopStalled || e instanceof SessionTurnError ||
+              e instanceof TurnCorrelationError || e instanceof UnsafeSessionHistoryError
               ? e.message
               : `${consecutiveErrors} fallos consecutivos. Ultimo: ${e.message}`;
             break;
@@ -252,8 +300,10 @@ async function runLoop({ req, sessionId, cfg, firstPrompt, flag, log, eventStrea
           reason = 'Errores repetidos del agente/proveedor';
           break;
         }
+        i++;
         continue;
       }
+      consecutiveErrors = 0;
 
       log.info(`Respuesta recibida (${u.output} tok salida, acumulado $${state.cost.toFixed(4)}):`);
       console.log(`  ${excerpt(text)}`);
@@ -283,6 +333,7 @@ async function runLoop({ req, sessionId, cfg, firstPrompt, flag, log, eventStrea
           }
         }
       }
+      i++;
     }
   } catch (e) {
     if (e instanceof LoopAborted || flag.aborted) {
@@ -303,10 +354,11 @@ module.exports = {
   runLoop,
   sleepAbortable,
   buildMessageBody,
-  createMessageId,
+  hasUnsafeWrappedHistory,
   isConfirmedPromptRejection,
   existingCompletion,
   exchange,
   LoopAborted,
   LoopStalled,
+  UnsafeSessionHistoryError,
 };

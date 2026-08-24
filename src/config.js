@@ -105,6 +105,7 @@ function loadConfig(args = {}) {
   if (Object.prototype.hasOwnProperty.call(args, 'model')) cfg.model = args.model || null;
   if (Object.prototype.hasOwnProperty.call(args, 'agent')) cfg.agent = args.agent || null;
   if (Object.prototype.hasOwnProperty.call(args, 'title')) cfg.title = args.title || null;
+  if (Object.prototype.hasOwnProperty.call(args, 'opencodeBin')) cfg.opencodeBin = args.opencodeBin || null;
   if (Object.prototype.hasOwnProperty.call(args, 'attach')) {
     cfg.attach = args.attach ? normalizeLoopbackUrl(args.attach) : null;
   }

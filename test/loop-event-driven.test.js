@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createMessageId, isConfirmedPromptRejection, runLoop } = require('../src/loop');
+const { buildMessageBody, hasUnsafeWrappedHistory, isConfirmedPromptRejection, runLoop } = require('../src/loop');
 
 function fakeEventStream() {
   const listeners = new Set();
@@ -62,6 +62,13 @@ function assistant(id, sessionId, text, completed = true, parentID = null) {
   };
 }
 
+function user(id, sessionId, text, created = Date.now()) {
+  return {
+    info: { id, sessionID: sessionId, role: 'user', time: { created } },
+    parts: Array.isArray(text) ? text : [{ type: 'text', text }],
+  };
+}
+
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -80,20 +87,42 @@ function harness(sessionId, stream) {
     messages: [],
     status: {},
     prompts: [],
+    promptBodies: [],
     promptIds: [],
     aborts: 0,
     ambiguousPost: false,
     statusError: null,
+    failStatus: 0,
+    statusCalls: 0,
+    failMessages: 0,
+    nextPrompt: 0,
   };
   return {
     state,
     async req(method, path, body) {
-      if (method === 'GET' && path === `/session/${sessionId}/message`) return state.messages;
-      if (method === 'GET' && path === '/session/status') return state.status;
+      if (method === 'GET' && path === `/session/${sessionId}/message`) {
+        if (state.failMessages > 0) {
+          state.failMessages--;
+          throw new Error('fallo transitorio de mensajes');
+        }
+        return state.messages;
+      }
+      if (method === 'GET' && path === '/session/status') {
+        state.statusCalls++;
+        if (state.failStatus > 0) {
+          state.failStatus--;
+          throw new Error('fallo transitorio de status');
+        }
+        return state.status;
+      }
       if (method === 'GET' && path === `/session/${sessionId}/todo`) return [];
       if (method === 'POST' && path === `/session/${sessionId}/prompt_async`) {
         state.prompts.push(body.parts[0].text);
-        state.promptIds.push(body.messageID);
+        state.promptBodies.push(body);
+        state.nextPrompt++;
+        const userId = `msg_${state.nextPrompt.toString(16).padStart(12, '0')}${'a'.repeat(14)}`;
+        state.promptIds.push(userId);
+        state.messages.push(user(userId, sessionId, body.parts.map((part) => ({ ...part }))));
         state.status = { [sessionId]: { type: 'busy' } };
         stream.emit({ type: 'session.status', properties: { sessionID: sessionId, status: { type: 'busy' } } });
         if (state.statusError) {
@@ -132,8 +161,9 @@ test('no envia por tiempo: continua una vez e inmediatamente tras terminal+idle'
   await delay(25);
   assert.equal(api.state.prompts.length, 1, 'no debe enviar mientras el turno sigue busy');
 
-  api.state.messages.push(assistant('msg_1', sessionId, 'avance incompleto', true, api.state.promptIds[0]));
-  stream.emit({ type: 'message.updated', properties: { info: api.state.messages[0].info } });
+  const firstReply = assistant('msg_1', sessionId, 'avance incompleto', true, api.state.promptIds[0]);
+  api.state.messages.push(firstReply);
+  stream.emit({ type: 'message.updated', properties: { info: firstReply.info } });
   await delay(10);
   assert.equal(api.state.prompts.length, 1, 'terminal persistido sin idle aun no continua');
 
@@ -143,9 +173,10 @@ test('no envia por tiempo: continua una vez e inmediatamente tras terminal+idle'
   await waitFor(() => api.state.prompts.length === 2);
   assert.ok(Date.now() - idleAt < 100, 'no debe aplicar delayMs al continuar');
 
-  api.state.messages.push(assistant('msg_2', sessionId, 'listo\n[TASK_COMPLETE]', true, api.state.promptIds[1]));
+  const secondReply = assistant('msg_2', sessionId, 'listo\n[TASK_COMPLETE]', true, api.state.promptIds[1]);
+  api.state.messages.push(secondReply);
   api.state.status = {};
-  stream.emit({ type: 'message.updated', properties: { info: api.state.messages[1].info } });
+  stream.emit({ type: 'message.updated', properties: { info: secondReply.info } });
   stream.emit({ type: 'session.idle', properties: { sessionID: sessionId } });
 
   const result = await run;
@@ -179,28 +210,30 @@ test('no envia antes de que SSE este conectado', async () => {
   connect();
   await waitFor(() => api.state.prompts.length === 1);
 
-  api.state.messages.push(assistant('msg_connected', sessionId, '[TASK_COMPLETE]', true, api.state.promptIds[0]));
+  const connectedReply = assistant('msg_connected', sessionId, '[TASK_COMPLETE]', true, api.state.promptIds[0]);
+  api.state.messages.push(connectedReply);
   api.state.status = {};
-  stream.emit({ type: 'message.updated', properties: { info: api.state.messages[0].info } });
+  stream.emit({ type: 'message.updated', properties: { info: connectedReply.info } });
   stream.emit({ type: 'session.idle', properties: { sessionID: sessionId } });
   assert.equal((await run).status, 'complete');
 });
 
-test('reanudar una sesion busy espera el turno existente sin inyectar prompt', async () => {
+test('reanudar adopta un turno sin resolver aunque status figure idle', async () => {
   const sessionId = 'ses_resume_busy';
   const stream = fakeEventStream();
   const api = harness(sessionId, stream);
-  const running = assistant('msg_existing', sessionId, '', false);
+  const running = assistant('msg_existing', sessionId, '', false, 'msg_user');
   api.state.messages = [
-    { info: { id: 'msg_user', sessionID: sessionId, role: 'user', time: { created: 1 } }, parts: [] },
+    user('msg_user', sessionId, 'tarea ya activa', 1),
     running,
   ];
-  api.state.status = { [sessionId]: { type: 'busy' } };
+  api.state.status = {};
   const run = runLoop({
     req: api.req,
     sessionId,
     cfg: cfg({ maxIterations: 1 }),
     firstPrompt: 'resume task',
+    resumeExisting: true,
     flag: { aborted: false, signal: new AbortController().signal },
     log: logger(),
     eventStream: stream,
@@ -216,6 +249,112 @@ test('reanudar una sesion busy espera el turno existente sin inyectar prompt', a
 
   const result = await run;
   assert.equal(result.status, 'complete');
+  assert.equal(api.state.prompts.length, 0);
+});
+
+test('busy desfasado espera idle y adopta el terminal ya persistido', async () => {
+  const sessionId = 'ses_stale_busy';
+  const stream = fakeEventStream();
+  const api = harness(sessionId, stream);
+  api.state.messages = [
+    user('msg_stale_user', sessionId, 'old task', 1),
+    assistant('msg_stale_terminal', sessionId, '[TASK_COMPLETE]', true, 'msg_stale_user'),
+  ];
+  api.state.status = { [sessionId]: { type: 'busy' } };
+  const run = runLoop({
+    req: api.req, sessionId, cfg: cfg({ maxIterations: 1 }), firstPrompt: 'resume', resumeExisting: true,
+    flag: { aborted: false, signal: new AbortController().signal }, log: logger(), eventStream: stream,
+  });
+
+  await delay(20);
+  assert.equal(api.state.prompts.length, 0);
+  api.state.status = {};
+  stream.emit({ type: 'session.idle', properties: { sessionID: sessionId } });
+  assert.equal((await run).status, 'complete');
+  assert.equal(api.state.prompts.length, 0);
+});
+
+test('una tarea nueva espera el busy correlacionado y despues envia su prompt', async () => {
+  const sessionId = 'ses_busy_then_new';
+  const stream = fakeEventStream();
+  const api = harness(sessionId, stream);
+  const running = assistant('msg_existing_work', sessionId, '', false, 'msg_existing_user');
+  api.state.messages = [user('msg_existing_user', sessionId, 'old task', 1), running];
+  api.state.status = { [sessionId]: { type: 'busy' } };
+  const run = runLoop({
+    req: api.req,
+    sessionId,
+    cfg: cfg({ maxIterations: 1 }),
+    firstPrompt: 'fresh task',
+    flag: { aborted: false, signal: new AbortController().signal },
+    log: logger(),
+    eventStream: stream,
+  });
+
+  await delay(20);
+  assert.equal(api.state.prompts.length, 0);
+  running.info.time.completed = Date.now();
+  running.parts = [{ type: 'text', text: 'old done' }];
+  api.state.status = {};
+  stream.emit({ type: 'message.updated', properties: { info: running.info } });
+  stream.emit({ type: 'session.idle', properties: { sessionID: sessionId } });
+  await waitFor(() => api.state.prompts.length === 1);
+  assert.equal(api.state.prompts[0], 'fresh task');
+
+  const reply = assistant('msg_fresh_reply', sessionId, '[TASK_COMPLETE]', true, api.state.promptIds[0]);
+  api.state.messages.push(reply);
+  api.state.status = {};
+  stream.emit({ type: 'message.updated', properties: { info: reply.info } });
+  stream.emit({ type: 'session.idle', properties: { sessionID: sessionId } });
+  assert.equal((await run).status, 'complete');
+  assert.equal(api.state.prompts.length, 1);
+});
+
+test('una tarea nueva espera un turno incompleto aunque status figure idle', async () => {
+  const sessionId = 'ses_idle_unresolved';
+  const stream = fakeEventStream();
+  const api = harness(sessionId, stream);
+  const running = assistant('msg_idle_work', sessionId, '', false, 'msg_idle_user');
+  api.state.messages = [user('msg_idle_user', sessionId, 'old task', 1), running];
+  api.state.status = {};
+  const run = runLoop({
+    req: api.req, sessionId, cfg: cfg({ maxIterations: 1 }), firstPrompt: 'new task',
+    flag: { aborted: false, signal: new AbortController().signal }, log: logger(), eventStream: stream,
+  });
+
+  await delay(20);
+  assert.equal(api.state.prompts.length, 0);
+  running.info.time.completed = Date.now();
+  running.parts = [{ type: 'text', text: 'old done' }];
+  stream.emit({ type: 'message.updated', properties: { info: running.info } });
+  stream.emit({ type: 'session.idle', properties: { sessionID: sessionId } });
+  await waitFor(() => api.state.prompts.length === 1);
+
+  const reply = assistant('msg_new_done', sessionId, '[TASK_COMPLETE]', true, api.state.promptIds[0]);
+  api.state.messages.push(reply);
+  api.state.status = {};
+  stream.emit({ type: 'message.updated', properties: { info: reply.info } });
+  stream.emit({ type: 'session.idle', properties: { sessionID: sessionId } });
+  assert.equal((await run).status, 'complete');
+  assert.equal(api.state.prompts.length, 1);
+});
+
+test('falla cerrado si status idle contiene multiples turnos sin resolver', async () => {
+  const sessionId = 'ses_idle_ambiguous';
+  const stream = fakeEventStream();
+  const api = harness(sessionId, stream);
+  api.state.messages = [
+    user('msg_open_a', sessionId, 'a', 1),
+    user('msg_open_b', sessionId, 'b', 2),
+  ];
+  api.state.status = {};
+
+  const result = await runLoop({
+    req: api.req, sessionId, cfg: cfg({ maxIterations: 1 }), firstPrompt: 'must not send',
+    flag: { aborted: false, signal: new AbortController().signal }, log: logger(), eventStream: stream,
+  });
+  assert.equal(result.status, 'error');
+  assert.match(result.reason, /multiples turnos sin resolver/);
   assert.equal(api.state.prompts.length, 0);
 });
 
@@ -238,6 +377,89 @@ test('timeout duro no aborta ni reenvia automaticamente', async () => {
   assert.equal(api.state.aborts, 0);
 });
 
+test('fallo transitorio del watchdog no rechaza ni reenvia el prompt aceptado', async () => {
+  const sessionId = 'ses_watchdog_repair';
+  const stream = fakeEventStream();
+  const api = harness(sessionId, stream);
+  const run = runLoop({
+    req: api.req,
+    sessionId,
+    cfg: cfg({ maxIterations: 1, retries: 2, stallTimeoutMs: 10, turnHardTimeoutMs: 200 }),
+    firstPrompt: 'single dispatch',
+    flag: { aborted: false, signal: new AbortController().signal },
+    log: logger(),
+    eventStream: stream,
+  });
+  await waitFor(() => api.state.prompts.length === 1);
+  api.state.failMessages = 1;
+  await delay(18);
+
+  const reply = assistant('msg_watchdog_done', sessionId, '[TASK_COMPLETE]', true, api.state.promptIds[0]);
+  api.state.messages.push(reply);
+  api.state.status = {};
+  stream.emit({ type: 'message.updated', properties: { info: reply.info } });
+  stream.emit({ type: 'session.idle', properties: { sessionID: sessionId } });
+  assert.equal((await run).status, 'complete');
+  assert.equal(api.state.prompts.length, 1);
+});
+
+test('fallo transitorio de status antes del POST reintenta sin enviar a ciegas', async () => {
+  const sessionId = 'ses_preflight_status_retry';
+  const stream = fakeEventStream();
+  const api = harness(sessionId, stream);
+  api.state.failStatus = 1;
+  const run = runLoop({
+    req: api.req,
+    sessionId,
+    cfg: cfg({ maxIterations: 1, retries: 0, maxConsecutiveErrors: 3 }),
+    firstPrompt: 'safe retry',
+    flag: { aborted: false, signal: new AbortController().signal },
+    log: logger(),
+    eventStream: stream,
+  });
+
+  await waitFor(() => api.state.prompts.length === 1);
+  assert.ok(api.state.statusCalls >= 2);
+  assert.equal(api.state.prompts[0], 'safe retry');
+  const reply = assistant('msg_safe_retry_done', sessionId, '[TASK_COMPLETE]', true, api.state.promptIds[0]);
+  api.state.messages.push(reply);
+  api.state.status = {};
+  stream.emit({ type: 'message.updated', properties: { info: reply.info } });
+  stream.emit({ type: 'session.idle', properties: { sessionID: sessionId } });
+  assert.equal((await run).status, 'complete');
+  assert.equal(api.state.prompts.length, 1);
+});
+
+test('errores terminales consecutivos del proveedor detienen el ciclo', async () => {
+  const sessionId = 'ses_provider_errors';
+  const stream = fakeEventStream();
+  const api = harness(sessionId, stream);
+  const run = runLoop({
+    req: api.req,
+    sessionId,
+    cfg: cfg({ maxIterations: 4, maxConsecutiveErrors: 2 }),
+    firstPrompt: 'provider failure task',
+    flag: { aborted: false, signal: new AbortController().signal },
+    log: logger(),
+    eventStream: stream,
+  });
+
+  for (let index = 0; index < 2; index++) {
+    await waitFor(() => api.state.prompts.length === index + 1);
+    const reply = assistant(`msg_provider_error_${index}`, sessionId, '', true, api.state.promptIds[index]);
+    reply.info.error = { name: 'APIError', data: { message: 'provider unavailable' } };
+    api.state.messages.push(reply);
+    api.state.status = {};
+    stream.emit({ type: 'message.updated', properties: { info: reply.info } });
+    stream.emit({ type: 'session.idle', properties: { sessionID: sessionId } });
+  }
+
+  const result = await run;
+  assert.equal(result.status, 'error');
+  assert.match(result.reason, /Errores repetidos/);
+  assert.equal(api.state.prompts.length, 2);
+});
+
 test('error de transporte ambiguo espera el turno aceptado sin duplicarlo', async () => {
   const sessionId = 'ses_ambiguous';
   const stream = fakeEventStream();
@@ -254,9 +476,10 @@ test('error de transporte ambiguo espera el turno aceptado sin duplicarlo', asyn
   });
 
   await waitFor(() => api.state.prompts.length === 1);
-  api.state.messages.push(assistant('msg_after_timeout', sessionId, '[TASK_COMPLETE]', true, api.state.promptIds[0]));
+  const timeoutReply = assistant('msg_after_timeout', sessionId, '[TASK_COMPLETE]', true, api.state.promptIds[0]);
+  api.state.messages.push(timeoutReply);
   api.state.status = {};
-  stream.emit({ type: 'message.updated', properties: { info: api.state.messages[0].info } });
+  stream.emit({ type: 'message.updated', properties: { info: timeoutReply.info } });
   stream.emit({ type: 'session.status', properties: { sessionID: sessionId, status: { type: 'idle' } } });
 
   const result = await run;
@@ -264,11 +487,23 @@ test('error de transporte ambiguo espera el turno aceptado sin duplicarlo', asyn
   assert.equal(api.state.prompts.length, 1);
 });
 
-test('IDs de mensaje son compatibles, monotonicos y los 5xx no se reenvian', async () => {
-  const first = createMessageId(1_800_000_000_000);
-  const second = createMessageId(1_800_000_000_000);
-  assert.match(first, /^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/u);
-  assert.ok(first < second);
+test('delega IDs al servidor, detecta wrap historico y no reenvia 5xx', async () => {
+  const firstBody = buildMessageBody(cfg(), 'task');
+  const secondBody = buildMessageBody(cfg(), 'task');
+  assert.equal(Object.hasOwn(firstBody, 'messageID'), false);
+  assert.equal(firstBody.parts.length, 2);
+  assert.deepEqual(firstBody.parts[0], { type: 'text', text: 'task' });
+  assert.equal(firstBody.parts[1].synthetic, true);
+  assert.equal(firstBody.parts[1].ignored, true);
+  assert.match(firstBody.parts[1].text, /^<!-- opencode-infinite-agent-turn:[0-9a-f-]{36} -->$/);
+  assert.notEqual(firstBody.parts[1].text, secondBody.parts[1].text);
+  const now = 1_800_000_000_000;
+  assert.equal(hasUnsafeWrappedHistory([
+    user(`msg_ffffffffffff${'a'.repeat(14)}`, 'ses_old', 'old', now - 120000),
+  ], now), true);
+  assert.equal(hasUnsafeWrappedHistory([
+    user(`msg_000000000001${'a'.repeat(14)}`, 'ses_new', 'new', now - 120000),
+  ], now), false);
   assert.equal(isConfirmedPromptRejection({ status: 400 }), true);
   assert.equal(isConfirmedPromptRejection({ status: 503 }), false);
 

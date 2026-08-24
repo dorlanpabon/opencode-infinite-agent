@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
 const { readFile } = require('node:fs/promises');
 const path = require('node:path');
 const test = require('node:test');
@@ -45,4 +46,19 @@ test('plantilla RPM fija chrome-sandbox a root y modo 4755', () => {
   const hardened = hardenRpmSpec(source);
   assert.match(hardened, /%attr\(4755, root, root\) \/usr\/lib\/<%= name %>\/chrome-sandbox/u);
   assert.equal(hardenRpmSpec(hardened), hardened);
+});
+
+test('smokes nativos rechazan rutas relativas', () => {
+  for (const [script, args] of [
+    ['smoke-desktop-package.mjs', ['--executable', 'OpenCodeInfinite']],
+    ['smoke-native-artifacts.mjs', ['--artifacts-root', 'out/make']],
+  ]) {
+    const result = spawnSync(process.execPath, [path.join(root, 'scripts', script), ...args], {
+      cwd: root,
+      encoding: 'utf8',
+      windowsHide: true,
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(`${result.stdout}\n${result.stderr}`, /debe ser absoluta/u);
+  }
 });

@@ -39,7 +39,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes fakeroot rpm xvfb
+          sudo apt-get install --yes cpio fakeroot rpm xvfb
       - name: Install dependencies
         run: npm ci
       - name: Validate release tag
@@ -81,6 +81,14 @@ jobs:
           dpkg-deb --contents release-assets/*.deb | grep -E -- '^-rwsr-xr-x root/root .*chrome-sandbox$'
           rpm -qpi release-assets/*.rpm
           rpm -qplv release-assets/*.rpm | grep -E -- '^-rwsr-xr-x[.]?[[:space:]]+1[[:space:]]+root[[:space:]]+root[[:space:]].*chrome-sandbox$'
+      - name: Smoke extracted native artifacts (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: npm run desktop:smoke:native -- --artifacts-root "$GITHUB_WORKSPACE/release-assets"
+      - name: Smoke extracted native artifacts (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: xvfb-run --auto-servernum npm run desktop:smoke:native -- --artifacts-root "$GITHUB_WORKSPACE/release-assets"
       - name: Upload native artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

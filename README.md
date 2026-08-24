@@ -2,10 +2,11 @@
 
 Supervisor de escritorio, local y orientado a eventos para llevar sesiones de OpenCode hasta una finalización verificable. Incluye una aplicación gráfica para Windows, macOS y Linux, además del CLI `loop-agent` para automatización.
 
-No envía mensajes cada *X* segundos. Envía exactamente un prompt, observa el stream SSE de OpenCode y solo continúa cuando coinciden dos hechos nuevos de esa sesión:
+No envía mensajes cada *X* segundos. Envía exactamente un prompt con un nonce criptográfico ignorado por el modelo, observa el stream SSE de OpenCode y solo continúa cuando coinciden tres hechos de esa sesión:
 
-1. existe una respuesta terminal del asistente persistida después del envío;
-2. OpenCode informa que la sesión quedó `idle`.
+1. OpenCode persiste el mensaje de usuario con ese nonce único;
+2. existe una respuesta terminal cuyo `parentID` apunta a ese mensaje;
+3. OpenCode informa que la sesión quedó `idle`.
 
 Después evalúa el marcador de finalización y los *todos*. Si la tarea sigue incompleta, envía la siguiente continuación inmediatamente. Los temporizadores son límites de seguridad: nunca disparan mensajes.
 
@@ -26,7 +27,7 @@ Cada release incluye `SHA256SUMS.txt`. Las versiones preliminares no están firm
 ## Requisitos
 
 - OpenCode instalado y autenticado en el equipo.
-- Para desarrollo: Node.js 22 LTS o posterior y npm.
+- Para desarrollo: Node.js 22 LTS y npm.
 - El workspace debe permitir las herramientas que la tarea necesite.
 
 La aplicación busca el binario oficial de OpenCode y también puede adjuntarse a un servidor local existente. Por seguridad, solo acepta orígenes loopback (`127.0.0.1`, `localhost` o `::1`) sin credenciales en la URL.
@@ -59,7 +60,7 @@ conectar SSE -> snapshot -> armar monitor -> POST prompt_async (una vez)
                       finalizar      enviar continuación
 ```
 
-El stream se reconecta con *backoff*. Después de una reconexión, el monitor vuelve a leer mensajes y estado para reparar eventos perdidos. Un error ambiguo del `POST` se reconcilia antes de reintentar, evitando prompts duplicados. Los límites suave y duro solo detectan un turno bloqueado; no abortan ni vuelven a enviar automáticamente.
+El stream se reconecta con *backoff* y vigila los *heartbeats*. Después de una reconexión, el monitor vuelve a leer mensajes y estado para reparar eventos perdidos. Un resultado ambiguo del `POST` se reconcilia sin reenviar, evitando prompts duplicados. Los límites suave y duro solo detectan un turno bloqueado; no abortan ni vuelven a enviar automáticamente.
 
 ## CLI
 
@@ -103,11 +104,15 @@ Una ejecución termina correctamente al detectar cualquiera de estas señales de
 
 También termina de forma controlada por cancelación, límite de iteraciones, límite total de la aplicación o timeout duro del turno. El estado final indica la causa.
 
+Las sesiones creadas antes de un *wrap* incompatible de IDs fallan de forma segura y solicitan una sesión nueva; nunca intentan continuar con una correlación dudosa.
+
 ## Permisos y seguridad
 
 - El servidor administrado escucha solo en loopback.
 - Las credenciales Basic Auth nunca se envían a un host remoto.
-- La autoaprobación filtra por el ID exacto de la sesión administrada.
+- Cada solicitud y el stream adjunto se enrutan al workspace exacto seleccionado.
+- La autoaprobación filtra por el ID exacto de la sesión, reconcilia respuestas ambiguas y se cancela con la ejecución.
+- Desktop ignora binarios definidos por el workspace salvo que el usuario seleccione uno explícitamente.
 - Electron usa aislamiento de contexto, sandbox, CSP estricta, navegación bloqueada y un puente IPC mínimo con validación de entradas.
 - Los logs eliminan secretos y no se guardan credenciales en el estado de ejecución.
 
@@ -130,7 +135,7 @@ npm run desktop:smoke
 npm run desktop:make
 ```
 
-`npm run check` ejecuta TypeScript estricto, build, pruebas, validación del paquete npm y auditoría de dependencias. El workflow de release construye y prueba cada plataforma en su runner nativo antes de publicar los instaladores.
+`npm run check` ejecuta TypeScript estricto, build, pruebas, validación del paquete npm y auditoría de dependencias. CI y release ejecutan el smoke de interfaz sobre la app empaquetada y, además, sobre el `.app` extraído del ZIP de macOS y los payloads extraídos de DEB y RPM. En Windows se valida y prueba el paquete portable que alimenta Squirrel; el Setup no se instala en CI para evitar cambios globales de registro, accesos directos y perfil del runner.
 
 ## Arquitectura
 
@@ -141,7 +146,7 @@ src/server.js                   HTTP, SSE, servidor y permisos
 src/loop.js                     ciclo de ejecución y finalización
 src/desktop/main.ts             proceso principal Electron
 src/desktop/engine-adapter.ts   adaptador in-process al motor
-src/desktop/run-manager.ts      persistencia y exclusión por workspace
+src/desktop/run-manager.ts      persistencia y exclusión global de ejecución
 src/desktop/renderer/           interfaz de usuario
 ```
 
