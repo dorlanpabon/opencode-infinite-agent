@@ -87,6 +87,17 @@ try {
   assert.equal(minimumFit.canScrollY, false);
   assert.equal(minimumFit.regions.every((region) => region.visible && region.inViewport), true);
   await window.screenshot({ path: path.join(qaDirectory, 'desktop-minimum.png') });
+
+  for (const viewport of [{ width: 760, height: 900 }, { width: 430, height: 932 }]) {
+    await window.setViewportSize(viewport);
+    await window.locator('#sessions-view-button').click();
+    const compactFit = await compactSessionsSnapshot(window);
+    assert.equal(compactFit.canScrollX, false);
+    assert.equal(compactFit.regions.every((region) => region.visible && region.inViewport), true);
+    await window.screenshot({
+      path: path.join(qaDirectory, `desktop-sessions-${viewport.width}.png`),
+    });
+  }
 } finally {
   await browser?.close().catch(() => undefined);
   await stopDesktop(desktop);
@@ -132,6 +143,25 @@ async function layoutSnapshot(window) {
           selector,
           visible: Boolean(rect && rect.width > 0 && rect.height > 0),
           inViewport: Boolean(rect && rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth + 1 && rect.bottom <= innerHeight + 1),
+        };
+      }),
+    };
+  });
+}
+
+async function compactSessionsSnapshot(window) {
+  return window.evaluate(() => {
+    const selectors = ['.sidebar', '.sidebar-browser', '.sidebar-tabs', '#sessions-view'];
+    return {
+      canScrollX: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+      regions: selectors.map((selector) => {
+        const element = document.querySelector(selector);
+        const rect = element?.getBoundingClientRect();
+        return {
+          selector,
+          visible: Boolean(rect && rect.width > 0 && rect.height > 0),
+          inViewport: Boolean(rect && rect.left >= 0 && rect.top >= 0
+            && rect.right <= innerWidth + 1 && rect.bottom <= innerHeight + 1),
         };
       }),
     };

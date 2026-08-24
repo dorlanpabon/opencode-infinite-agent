@@ -9,12 +9,14 @@ const CHANNELS = Object.freeze({
   chooseBinary: 'binary:choose',
   listRuns: 'runs:list',
   getRun: 'runs:get',
+  listSessions: 'sessions:list',
+  setContinuous: 'sessions:set-continuous',
   startRun: 'runs:start',
   stopRun: 'runs:stop',
   event: 'runs:event',
 });
 
-const EVENT_TYPES = new Set(['run-changed', 'operation-finished', 'operation-error', 'log']);
+const EVENT_TYPES = new Set(['run-changed', 'operation-finished', 'operation-error', 'sessions-snapshot', 'log']);
 
 function isDesktopEvent(value: unknown): value is DesktopEvent {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -28,6 +30,8 @@ const api: DesktopApi = {
   chooseBinary: () => ipcRenderer.invoke(CHANNELS.chooseBinary),
   listRuns: () => ipcRenderer.invoke(CHANNELS.listRuns),
   getRun: (runId) => ipcRenderer.invoke(CHANNELS.getRun, runId),
+  listSessions: (input) => ipcRenderer.invoke(CHANNELS.listSessions, input),
+  setContinuous: (input) => ipcRenderer.invoke(CHANNELS.setContinuous, input),
   startRun: (input) => ipcRenderer.invoke(CHANNELS.startRun, input),
   stopRun: (runId) => ipcRenderer.invoke(CHANNELS.stopRun, runId),
   onEvent: (listener) => {

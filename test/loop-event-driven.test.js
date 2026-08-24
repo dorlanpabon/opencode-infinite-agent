@@ -224,7 +224,7 @@ test('reanudar adopta un turno sin resolver aunque status figure idle', async ()
   const api = harness(sessionId, stream);
   const running = assistant('msg_existing', sessionId, '', false, 'msg_user');
   api.state.messages = [
-    user('msg_user', sessionId, 'tarea ya activa', 1),
+    user('msg_user', sessionId, 'tarea ya activa'),
     running,
   ];
   api.state.status = {};
@@ -279,7 +279,7 @@ test('una tarea nueva espera el busy correlacionado y despues envia su prompt', 
   const stream = fakeEventStream();
   const api = harness(sessionId, stream);
   const running = assistant('msg_existing_work', sessionId, '', false, 'msg_existing_user');
-  api.state.messages = [user('msg_existing_user', sessionId, 'old task', 1), running];
+  api.state.messages = [user('msg_existing_user', sessionId, 'old task'), running];
   api.state.status = { [sessionId]: { type: 'busy' } };
   const run = runLoop({
     req: api.req,
@@ -315,7 +315,7 @@ test('una tarea nueva espera un turno incompleto aunque status figure idle', asy
   const stream = fakeEventStream();
   const api = harness(sessionId, stream);
   const running = assistant('msg_idle_work', sessionId, '', false, 'msg_idle_user');
-  api.state.messages = [user('msg_idle_user', sessionId, 'old task', 1), running];
+  api.state.messages = [user('msg_idle_user', sessionId, 'old task'), running];
   api.state.status = {};
   const run = runLoop({
     req: api.req, sessionId, cfg: cfg({ maxIterations: 1 }), firstPrompt: 'new task',
@@ -344,8 +344,8 @@ test('falla cerrado si status idle contiene multiples turnos sin resolver', asyn
   const stream = fakeEventStream();
   const api = harness(sessionId, stream);
   api.state.messages = [
-    user('msg_open_a', sessionId, 'a', 1),
-    user('msg_open_b', sessionId, 'b', 2),
+    user('msg_open_a', sessionId, 'a'),
+    user('msg_open_b', sessionId, 'b'),
   ];
   api.state.status = {};
 
@@ -354,7 +354,7 @@ test('falla cerrado si status idle contiene multiples turnos sin resolver', asyn
     flag: { aborted: false, signal: new AbortController().signal }, log: logger(), eventStream: stream,
   });
   assert.equal(result.status, 'error');
-  assert.match(result.reason, /multiples turnos sin resolver/);
+  assert.match(result.reason, /multiples turnos.*sin resolver/);
   assert.equal(api.state.prompts.length, 0);
 });
 

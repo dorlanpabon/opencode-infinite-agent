@@ -6,10 +6,13 @@ import type {
   DoctorInput,
   DoctorResult,
   LogLevel,
+  OpenCodeSessionSummary,
   OperationReceipt,
   RunState,
   RunStatus,
   SseState,
+  SessionConnectionInput,
+  SetContinuousInput,
   StartRunInput,
 } from './contracts.js';
 
@@ -72,7 +75,12 @@ export interface EngineRunResult {
 export interface DesktopEngineAdapter {
   doctor(input: DoctorInput): Promise<DoctorResult>;
   run(input: StartRunInput, context: EngineRunContext): Promise<EngineRunResult>;
+  listSessions?(
+    input: SessionConnectionInput,
+    listener: (sessions: OpenCodeSessionSummary[]) => void,
+  ): Promise<OpenCodeSessionSummary[]>;
   stop?(runId: string, sessionId: string | null): Promise<void>;
+  shutdown?(): Promise<void>;
 }
 
 interface ActiveRun {
@@ -147,6 +155,10 @@ function workspaceKey(workspace: string): string {
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
+function sessionConnectionKey(input: SessionConnectionInput): string {
+  return JSON.stringify([workspaceKey(input.workspace), input.binary, input.attach]);
+}
+
 function titleFromTask(task: string): string {
   const firstLine = task.split(/\r?\n/u, 1)[0]?.trim() || 'Ejecución OpenCode';
   return firstLine.length <= 72 ? firstLine : `${firstLine.slice(0, 69)}…`;
@@ -171,7 +183,10 @@ export class RunManager {
   private readonly active = new Map<string, ActiveRun>();
   private readonly states = new Map<string, RunState>();
   private readonly writeChains = new Map<string, Promise<void>>();
+  private readonly sessionLeases = new Set<string>();
   private readonly runsDirectory: string;
+  private catalogSessions: OpenCodeSessionSummary[] = [];
+  private catalogLoaded = false;
   private adapter: DesktopEngineAdapter | null;
 
   constructor(
@@ -245,14 +260,40 @@ export class RunManager {
     return structuredClone(state);
   }
 
+  async listSessions(input: SessionConnectionInput): Promise<OpenCodeSessionSummary[]> {
+    if (!this.adapter?.listSessions) {
+      throw new DesktopRunError('SESSIONS_UNAVAILABLE', 'El motor OpenCode no expone un catálogo de sesiones.');
+    }
+    const activeState = [...this.active.keys()].map((runId) => this.states.get(runId)).find(Boolean);
+    if (activeState && sessionConnectionKey(input) !== sessionConnectionKey(activeState)) {
+      throw new DesktopRunError(
+        'ENGINE_BUSY',
+        'No se puede cambiar el servidor de sesiones mientras existe una ejecución activa.',
+      );
+    }
+    const sessions = await this.adapter.listSessions(input, (next) => this.updateCatalog(next));
+    this.updateCatalog(sessions);
+    return this.decorateSessions();
+  }
+
+  async setContinuous(input: SetContinuousInput): Promise<OperationReceipt> {
+    if (input.enabled) return this.start(input.run);
+    return this.pauseSession(input.sessionId);
+  }
+
   async start(input: StartRunInput): Promise<OperationReceipt> {
     const adapter = this.adapter;
     if (!adapter) throw new DesktopRunError('ENGINE_UNAVAILABLE', 'El motor OpenCode Desktop no está integrado en esta compilación.');
 
     const key = workspaceKey(input.workspace);
+    const sessionLease = input.resumeExisting && input.sessionRef ? input.sessionRef : null;
+    if (sessionLease && this.sessionLeases.has(sessionLease)) {
+      throw new DesktopRunError('SESSION_ALREADY_MANAGED', 'La sesión ya tiene el modo continuo activo.');
+    }
     if (this.active.size > 0) {
       throw new DesktopRunError('ENGINE_BUSY', 'OpenCode Infinite ya tiene una ejecución activa.');
     }
+    if (sessionLease) this.sessionLeases.add(sessionLease);
 
     const operationId = randomUUID();
     const runId = randomUUID();
@@ -305,11 +346,16 @@ export class RunManager {
     } catch (error) {
       this.active.delete(runId);
       this.states.delete(runId);
+      if (sessionLease) this.sessionLeases.delete(sessionLease);
       throw error;
     }
     this.publishState(state);
     active.promise = this.execute(adapter, input, state, controller.signal)
-      .finally(() => this.active.delete(runId));
+      .finally(() => {
+        this.active.delete(runId);
+        if (sessionLease) this.sessionLeases.delete(sessionLease);
+        this.publishSessions();
+      });
     return { operationId, runId };
   }
 
@@ -333,6 +379,22 @@ export class RunManager {
     return { operationId: active.operationId, runId };
   }
 
+  async pauseSession(sessionId: string): Promise<OperationReceipt> {
+    if (!this.sessionLeases.has(sessionId)) {
+      throw new DesktopRunError('SESSION_NOT_MANAGED', 'La sesión no tiene el modo continuo activo.');
+    }
+    const state = [...this.active.keys()]
+      .map((runId) => this.states.get(runId))
+      .find((candidate) => candidate?.sessionRef === sessionId && ACTIVE_STATUSES.has(candidate.status));
+    if (!state) throw new DesktopRunError('SESSION_NOT_MANAGED', 'La sesión no tiene el modo continuo activo.');
+    const active = this.active.get(state.runId);
+    if (!active) throw new DesktopRunError('RUN_NOT_ACTIVE', 'La supervisión no está activa en esta instancia.');
+    const reason = 'Modo continuo desactivado; el turno actual continúa en OpenCode.';
+    active.controller.abort(new DesktopRunError('RUN_PAUSED', reason));
+    await active.promise;
+    return { operationId: active.operationId, runId: active.runId };
+  }
+
   async shutdown(): Promise<void> {
     const active = [...this.active.values()];
     for (const run of active) {
@@ -341,6 +403,7 @@ export class RunManager {
       if (this.adapter?.stop) void this.adapter.stop(run.runId, state?.sessionId ?? null).catch(() => undefined);
     }
     await Promise.allSettled(active.map((run) => run.promise));
+    if (this.adapter?.shutdown) await this.adapter.shutdown();
   }
 
   private async execute(
@@ -366,7 +429,9 @@ export class RunManager {
         emit: queueEvent,
       });
       await eventChain;
-      applyResult(state, signal.aborted ? { status: 'stopped', reason: 'Ejecución detenida.' } : result);
+      applyResult(state, signal.aborted
+        ? { status: 'stopped', reason: safeText(signal.reason ?? 'Ejecución detenida.') }
+        : result);
       await this.persistAndPublish(state);
       this.emit({ type: 'operation-finished', operationId: state.operationId, run: structuredClone(state) });
     } catch (error) {
@@ -374,7 +439,7 @@ export class RunManager {
       const stopped = signal.aborted;
       const serialized = operationError(error);
       state.status = stopped ? 'stopped' : 'failed';
-      state.reason = stopped ? 'Ejecución detenida.' : serialized.message;
+      state.reason = stopped ? safeText(signal.reason ?? 'Ejecución detenida.') : serialized.message;
       state.lastError = stopped ? null : serialized.message;
       state.sseState = 'closed';
       state.completedAt = new Date().toISOString();
@@ -439,6 +504,29 @@ export class RunManager {
 
   private publishState(state: RunState): void {
     this.emit({ type: 'run-changed', operationId: state.operationId, run: structuredClone(state) });
+    this.publishSessions();
+  }
+
+  private updateCatalog(sessions: OpenCodeSessionSummary[]): void {
+    this.catalogLoaded = true;
+    this.catalogSessions = sessions.map((session) => ({ ...session, continuous: false, runId: null }));
+    this.publishSessions();
+  }
+
+  private decorateSessions(): OpenCodeSessionSummary[] {
+    return this.catalogSessions.map((session) => {
+      const run = this.sessionLeases.has(session.id)
+        ? [...this.active.keys()]
+          .map((runId) => this.states.get(runId))
+          .find((candidate) => candidate?.sessionRef === session.id && ACTIVE_STATUSES.has(candidate.status))
+        : undefined;
+      return { ...session, continuous: Boolean(run), runId: run?.runId ?? null };
+    });
+  }
+
+  private publishSessions(): void {
+    if (!this.catalogLoaded) return;
+    this.emit({ type: 'sessions-snapshot', sessions: this.decorateSessions() });
   }
 
   private async persistAndPublish(state: RunState): Promise<void> {

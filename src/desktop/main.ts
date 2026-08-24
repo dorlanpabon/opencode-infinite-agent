@@ -14,10 +14,13 @@ import {
   DESKTOP_ORIGIN,
   parseDoctorInput,
   parseRunId,
+  parseSessionConnectionInput,
+  parseSetContinuousInput,
   parseStartRunInput,
   type DesktopEvent,
   type DoctorInput,
   type DoctorResult,
+  type SessionConnectionInput,
   type StartRunInput,
 } from './contracts.js';
 import { createOpenCodeEngineAdapter } from './engine-adapter.js';
@@ -34,6 +37,8 @@ const CHANNELS = {
   chooseBinary: 'binary:choose',
   listRuns: 'runs:list',
   getRun: 'runs:get',
+  listSessions: 'sessions:list',
+  setContinuous: 'sessions:set-continuous',
   startRun: 'runs:start',
   stopRun: 'runs:stop',
   event: 'runs:event',
@@ -138,6 +143,15 @@ async function assertStartPaths(input: StartRunInput): Promise<void> {
   }
 }
 
+async function assertConnectionPaths(input: SessionConnectionInput): Promise<void> {
+  assertAbsolutePath(input.workspace, 'El workspace');
+  if (!await isDirectory(input.workspace)) throw new TypeError('El workspace no existe o no es un directorio.');
+  if (input.binary !== null) {
+    assertAbsolutePath(input.binary, 'El binario OpenCode');
+    if (!await isFile(input.binary)) throw new TypeError('El binario OpenCode no existe o no es un archivo.');
+  }
+}
+
 async function doctor(input: DoctorInput): Promise<DoctorResult> {
   const result = await manager().doctor(input);
   const warnings = [...result.warnings];
@@ -196,6 +210,18 @@ function registerHandlers(): void {
   ipcMain.handle(CHANNELS.getRun, async (event, raw: unknown) => {
     assertTrustedSender(event);
     return manager().getRun(parseRunId(raw));
+  });
+  ipcMain.handle(CHANNELS.listSessions, async (event, raw: unknown) => {
+    assertTrustedSender(event);
+    const input = parseSessionConnectionInput(raw);
+    await assertConnectionPaths(input);
+    return manager().listSessions(input);
+  });
+  ipcMain.handle(CHANNELS.setContinuous, async (event, raw: unknown) => {
+    assertTrustedSender(event);
+    const input = parseSetContinuousInput(raw);
+    if (input.enabled) await assertStartPaths(input.run);
+    return manager().setContinuous(input);
   });
   ipcMain.handle(CHANNELS.startRun, async (event, raw: unknown) => {
     assertTrustedSender(event);
@@ -322,7 +348,11 @@ if (squirrelStartup || !hasSingleInstanceLock) {
   });
 
   app.on('before-quit', (event) => {
-    if (allowQuit || !runManager?.hasActiveRuns) return;
+    if (allowQuit) return;
+    if (!runManager) {
+      allowQuit = true;
+      return;
+    }
     event.preventDefault();
     if (shutdownStarted) return;
     shutdownStarted = true;

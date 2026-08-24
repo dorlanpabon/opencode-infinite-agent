@@ -1,5 +1,12 @@
-import type { DoctorInput, DoctorResult, StartRunInput } from './contracts.js';
+import type {
+  DoctorInput,
+  DoctorResult,
+  OpenCodeSessionSummary,
+  SessionConnectionInput,
+  StartRunInput,
+} from './contracts.js';
 import type { DesktopEngineAdapter, EngineRunContext, EngineRunResult } from './run-manager.js';
+import { OpenCodeSessionCatalog } from './session-catalog.js';
 
 interface AgentResult {
   status: 'complete' | 'max-iterations' | 'aborted' | 'error';
@@ -26,6 +33,7 @@ interface AgentModule {
       cost?: number;
       lastText?: string;
     }): void;
+    abortRemoteOnSignal?: boolean;
   }): Promise<AgentResult>;
 }
 
@@ -91,7 +99,11 @@ async function doctor(input: DoctorInput): Promise<DoctorResult> {
   };
 }
 
-async function run(input: StartRunInput, context: EngineRunContext): Promise<EngineRunResult> {
+async function run(
+  input: StartRunInput,
+  context: EngineRunContext,
+  catalog: OpenCodeSessionCatalog,
+): Promise<EngineRunResult> {
   const controller = new AbortController();
   let wallLimited = false;
   const relayAbort = () => controller.abort(context.signal.reason);
@@ -104,17 +116,23 @@ async function run(input: StartRunInput, context: EngineRunContext): Promise<Eng
 
   emit(context, { type: 'phase', status: 'connecting', detail: 'Conectando al stream de eventos de OpenCode…' });
   try {
+    const connectionInput: SessionConnectionInput = {
+      workspace: input.workspace,
+      binary: input.binary,
+      attach: input.attach,
+    };
+    const connection = await catalog.connect(connectionInput);
     const ref = input.sessionRef;
     const result = await agentModule.executeAgent({
       dir: input.workspace,
-      prompt: input.task,
+      prompt: input.resumeExisting ? undefined : input.task,
       session: ref && ref.startsWith('ses_') ? ref : undefined,
       deeplink: ref && ref.startsWith('oc://') ? ref : undefined,
       title: input.name,
       model: input.model,
       agent: input.agent,
       binary: input.binary,
-      attach: input.attach,
+      attach: connection.base,
       maxIterations: input.maxIterations,
       stallTimeoutMin: input.stallMinutes,
       turnHardTimeoutMin: Math.max(input.stallMinutes, Math.ceil(input.maxHours * 60)),
@@ -122,7 +140,7 @@ async function run(input: StartRunInput, context: EngineRunContext): Promise<Eng
       noTodos: !input.todoDetection,
       autoApprove: input.autoApprove,
       keepServer: false,
-      exclusiveServer: input.attach === null,
+      exclusiveServer: false,
     }, {
       signal: controller.signal,
       log: logger(context),
@@ -154,7 +172,9 @@ async function run(input: StartRunInput, context: EngineRunContext): Promise<Eng
           lastMessage: event.lastText,
         });
       },
+      abortRemoteOnSignal: !input.resumeExisting,
     });
+    void catalog.reconcile().catch(() => undefined);
     emit(context, {
       type: 'progress',
       iteration: result.state.iterations,
@@ -196,5 +216,23 @@ async function run(input: StartRunInput, context: EngineRunContext): Promise<Eng
 }
 
 export function createOpenCodeEngineAdapter(): DesktopEngineAdapter {
-  return { doctor, run };
+  let sessionListener: ((sessions: OpenCodeSessionSummary[]) => void) | null = null;
+  const catalog = new OpenCodeSessionCatalog((level, message) => {
+    if (level === 'warn') process.stderr.write(`${message}\n`);
+  });
+  catalog.setListener((sessions) => {
+    sessionListener?.(sessions);
+  });
+  return {
+    doctor,
+    run: (input, context) => run(input, context, catalog),
+    async listSessions(input, listener) {
+      sessionListener = listener;
+      return (await catalog.connect(input)).sessions;
+    },
+    async shutdown() {
+      sessionListener = null;
+      await catalog.close();
+    },
+  };
 }

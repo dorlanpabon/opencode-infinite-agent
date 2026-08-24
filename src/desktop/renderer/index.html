@@ -38,12 +38,21 @@
           <kbd id="new-run-shortcut">Ctrl N</kbd>
         </button>
 
-        <div class="sidebar-heading">
-          <span>Historial</span>
-          <span class="count" id="run-count">0</span>
+        <div class="sidebar-browser">
+          <div class="sidebar-tabs" role="tablist" aria-label="Sesiones y ejecuciones">
+            <button class="sidebar-tab is-active" id="sessions-view-button" type="button" role="tab" aria-selected="true" aria-controls="sessions-view">Sesiones <span class="count" id="session-count">0</span></button>
+            <button class="sidebar-tab" id="runs-view-button" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="runs-view">Historial <span class="count" id="run-count">0</span></button>
+          </div>
+          <section id="sessions-view" role="tabpanel" aria-labelledby="sessions-view-button">
+            <button class="text-button sessions-connect" id="sessions-connect-button" type="button">Conectar servidor…</button>
+            <div class="session-list" id="session-list" aria-label="Sesiones OpenCode" aria-busy="false"></div>
+            <p class="sidebar-empty" id="session-list-empty">Conecta el servidor local usado por OpenCode para ver sus sesiones.</p>
+          </section>
+          <section id="runs-view" role="tabpanel" aria-labelledby="runs-view-button" hidden>
+            <nav class="run-list" id="run-list" aria-label="Historial de ejecuciones"></nav>
+            <p class="sidebar-empty" id="run-list-empty">Todavía no hay ejecuciones guardadas.</p>
+          </section>
         </div>
-        <nav class="run-list" id="run-list" aria-label="Historial de ejecuciones"></nav>
-        <p class="sidebar-empty" id="run-list-empty">Todavía no hay ejecuciones guardadas.</p>
 
         <footer class="sidebar-footer">
           <span id="app-version">Cargando versión…</span>
@@ -209,13 +218,13 @@
         </header>
 
         <div class="dialog-body">
-          <label class="field field--full">
+          <label class="field field--full" id="task-field">
             <span>Tarea</span>
             <textarea id="task-input" name="task" rows="5" maxlength="8000" required placeholder="Describe un resultado comprobable y cuándo debe considerarse terminado."></textarea>
             <small><span>Se enviará a OpenCode.</span><span id="task-count">0 / 8000</span></small>
           </label>
 
-          <div class="field-grid">
+          <div class="field-grid" id="identity-fields">
             <label class="field field--wide">
               <span>Workspace</span>
               <span class="picker">
@@ -229,7 +238,7 @@
             </label>
           </div>
 
-          <div class="limits-grid">
+          <div class="limits-grid" id="limits-fields">
             <label class="field"><span>Iteraciones</span><input id="max-iterations-input" type="number" min="1" max="10000" step="1" value="100" required></label>
             <label class="field"><span>Máximo horas</span><input id="max-hours-input" type="number" min="0.05" max="720" step="0.05" value="8" required></label>
             <label class="field"><span>Inactividad min</span><input id="stall-minutes-input" type="number" min="1" max="1440" step="1" value="20" required></label>
