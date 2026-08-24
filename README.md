@@ -40,9 +40,15 @@ La aplicación busca el binario oficial de OpenCode y también puede adjuntarse 
 4. Opcionalmente define sesión, modelo, agente, límites o servidor local.
 5. Ejecuta el diagnóstico y pulsa **Iniciar supervisor**.
 
-La interfaz muestra el ciclo del turno, estado del stream, sesión, iteración, consumo, historial y logs. Solo permite una ejecución activa por instancia y conserva el estado de forma atómica para recuperarse tras un cierre. Cada ejecución administrada recibe un servidor y puerto loopback dedicados.
+La interfaz muestra el ciclo del turno, estado del stream, sesión, iteración, consumo, historial y logs. Solo permite una ejecución activa por instancia y conserva el estado de forma atómica para recuperarse tras un cierre. Si no se adjunta a un servidor existente, la instancia usa un servidor loopback local compartido por el catálogo y la ejecución activa.
 
 La autoaprobación de permisos está desactivada por defecto y exige una confirmación explícita por ejecución.
+
+### Sesiones activas
+
+La pestaña **Sesiones** consulta las sesiones del servidor local conectado, combina `GET /session` y `GET /session/status` y se mantiene al día con el stream SSE. El interruptor **Continuar hasta terminar** adopta una sesión existente sin repetir la tarea original: espera a que el turno actual sea terminal y la sesión quede `idle` antes de decidir si necesita una continuación. Los temporizadores siguen siendo límites de seguridad y nunca envían prompts.
+
+Desactivar el interruptor libera el supervisor local sin llamar a `/abort`, por lo que no cancela el trabajo remoto. Solo puede haber una sesión supervisada por instancia. El catálogo cubre el servidor compartido administrado por OpenCode Infinite o un servidor loopback adjuntado explícitamente; un sidecar privado de OpenCode Desktop no es visible sin su puerto y credenciales.
 
 ## Máquina de estados
 
@@ -147,6 +153,7 @@ src/loop.js                     ciclo de ejecución y finalización
 src/desktop/main.ts             proceso principal Electron
 src/desktop/engine-adapter.ts   adaptador in-process al motor
 src/desktop/run-manager.ts      persistencia y exclusión global de ejecución
+src/desktop/session-catalog.ts  catálogo de sesiones reconciliado por SSE
 src/desktop/renderer/           interfaz de usuario
 ```
 
