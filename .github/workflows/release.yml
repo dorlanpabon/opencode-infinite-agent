@@ -78,9 +78,9 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           dpkg-deb --info release-assets/*.deb
-          dpkg-deb --contents release-assets/*.deb >/dev/null
+          dpkg-deb --contents release-assets/*.deb | grep -E -- '^-rwsr-xr-x root/root .*chrome-sandbox$'
           rpm -qpi release-assets/*.rpm
-          rpm -qpl release-assets/*.rpm >/dev/null
+          rpm -qplv release-assets/*.rpm | grep -E -- '^-rwsr-xr-x[.]?[[:space:]]+1[[:space:]]+root[[:space:]]+root[[:space:]].*chrome-sandbox$'
       - name: Upload native artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

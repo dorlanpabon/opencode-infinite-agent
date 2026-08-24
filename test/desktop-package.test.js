@@ -27,8 +27,11 @@ test('paquete Electron usa allowlist y makers multiplataforma', () => {
   const { makers, packagerConfig } = require('../forge.config.cjs');
   const ignored = (candidate) => packagerConfig.ignore.some((pattern) => pattern.test(candidate));
   assert.equal(packagerConfig.name, packagerConfig.executableName);
+  assert.match(packagerConfig.icon, /assets[\\/]icon$/u);
   assert.equal(ignored('/dist/desktop/main.js'), false);
-  assert.equal(ignored('/src/server.js'), false);
+  assert.equal(ignored('/assets/icon.png'), false);
+  assert.equal(ignored('/assets/icon.svg'), true);
+  assert.equal(ignored('/src/server.js'), true);
   assert.equal(ignored('/.task-tiktok.txt'), true);
   assert.equal(ignored('/node_modules/@electron-forge/cli/package.json'), true);
   assert.ok(makers.some((maker) => maker.platforms?.includes('win32')));

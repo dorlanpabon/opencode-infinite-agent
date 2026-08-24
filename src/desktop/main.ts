@@ -23,6 +23,7 @@ import {
 import { createOpenCodeEngineAdapter } from './engine-adapter.js';
 import {
   RunManager,
+  safeText,
   type DesktopEngineAdapter,
 } from './run-manager.js';
 
@@ -80,12 +81,7 @@ export function configureDesktopEngineAdapter(adapter: DesktopEngineAdapter): vo
 }
 
 function safeError(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  return message
-    .replace(/\u001B\[[0-?]*[ -/]*[@-~]/gu, '')
-    .replace(/(authorization\s*:\s*basic\s+)[A-Za-z0-9+/=]+/giu, '$1[REDACTED]')
-    .replace(/((?:password|token|secret|api[_-]?key)\s*[=:]\s*)[^\s,;]+/giu, '$1[REDACTED]')
-    .slice(0, 4_000);
+  return safeText(error);
 }
 
 function manager(): RunManager {
@@ -248,6 +244,7 @@ function createWindow(): BrowserWindow {
     height: 900,
     minWidth: 940,
     minHeight: 640,
+    icon: path.join(app.getAppPath(), 'assets', 'icon.png'),
     show: false,
     backgroundColor: '#10110f',
     title: 'OpenCode Infinite',
@@ -297,7 +294,9 @@ if (squirrelStartup || !hasSingleInstanceLock) {
   });
 
   app.whenReady().then(async () => {
-    Menu.setApplicationMenu(null);
+    Menu.setApplicationMenu(process.platform === 'darwin'
+      ? Menu.buildFromTemplate([{ role: 'appMenu' }, { role: 'editMenu' }, { role: 'windowMenu' }])
+      : null);
     session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
     session.defaultSession.setPermissionCheckHandler(() => false);
     await registerRendererProtocol();

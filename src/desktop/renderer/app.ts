@@ -62,6 +62,7 @@ const ui = {
   doctorSignal: element<HTMLSpanElement>('doctor-signal'),
   doctorLabel: element<HTMLElement>('doctor-label'),
   newRunButton: element<HTMLButtonElement>('new-run-button'),
+  newRunShortcut: element<HTMLElement>('new-run-shortcut'),
   emptyNewRunButton: element<HTMLButtonElement>('empty-new-run-button'),
   runCount: element<HTMLElement>('run-count'),
   runList: element<HTMLElement>('run-list'),
@@ -651,6 +652,7 @@ async function initialize(): Promise<void> {
   try {
     const info = await api.systemInfo();
     ui.appVersion.textContent = `v${info.version} · ${info.platform}/${info.arch}`;
+    ui.newRunShortcut.textContent = info.platform === 'darwin' ? '⌘ N' : 'Ctrl N';
   } catch (error) {
     ui.appVersion.textContent = 'Versión no disponible';
     appendLog('warn', `Sistema: ${errorText(error)}`);

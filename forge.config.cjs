@@ -1,7 +1,10 @@
+const path = require('node:path');
 const { version } = require('./package.json');
 
 const homepage = 'https://github.com/dorlanpabon/opencode-infinite-agent';
 const description = 'Event-driven desktop supervisor for OpenCode sessions';
+const iconBase = path.join(__dirname, 'assets', 'icon');
+const iconPng = `${iconBase}.png`;
 
 module.exports = {
   packagerConfig: {
@@ -9,6 +12,7 @@ module.exports = {
     appBundleId: 'com.dorlanpabon.opencode-infinite',
     appCategoryType: 'public.app-category.developer-tools',
     executableName: 'OpenCodeInfinite',
+    icon: iconBase,
     name: 'OpenCodeInfinite',
     win32metadata: {
       CompanyName: 'dorlanpabon',
@@ -18,9 +22,10 @@ module.exports = {
     ignore: [
       /^\/out(?:\/|$)/,
       /^\/(?:test|scripts|\.github)(?:\/|$)/,
+      /^\/assets\/(?!icon\.png$).+/,
       /^\/node_modules\/(?!electron-squirrel-startup(?:\/|$)|debug(?:\/|$)|ms(?:\/|$)).+/,
       /^\/dist\/.*\.(?:map|d\.(?:c|m)?ts)$/,
-      /^\/(?!dist(?:\/|$)|src(?:\/|$)|bin(?:\/|$)|node_modules(?:\/|$)|package\.json$|README\.md$|SECURITY\.md$|LICENSE$).+/,
+      /^\/(?!assets(?:\/|$)|dist(?:\/|$)|node_modules(?:\/|$)|package\.json$|README\.md$|SECURITY\.md$|LICENSE$).+/,
     ],
   },
   rebuildConfig: {},
@@ -32,6 +37,7 @@ module.exports = {
         name: 'OpenCodeInfinite',
         authors: 'dorlanpabon',
         description,
+        setupIcon: `${iconBase}.ico`,
         setupExe: `OpenCode-Infinite-${version}-Setup.exe`,
         title: 'OpenCode Infinite',
       },
@@ -50,6 +56,7 @@ module.exports = {
           section: 'devel',
           maintainer: 'dorlanpabon',
           homepage,
+          icon: iconPng,
           categories: ['Development'],
           bin: 'OpenCodeInfinite',
         },
@@ -68,6 +75,7 @@ module.exports = {
           license: 'MIT',
           group: 'Development/Tools',
           homepage,
+          icon: iconPng,
           categories: ['Development'],
           bin: 'OpenCodeInfinite',
         },

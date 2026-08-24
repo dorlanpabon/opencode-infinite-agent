@@ -127,12 +127,13 @@ function isRunState(value: unknown): value is RunState {
     && nullableString(value.lastError, 4_000);
 }
 
-function safeText(value: unknown, maximum = 4_000): string {
+export function safeText(value: unknown, maximum = 4_000): string {
   const text = value instanceof Error ? value.message : String(value);
   return text
     .replace(/\u001B\[[0-?]*[ -/]*[@-~]/gu, '')
-    .replace(/(authorization\s*:\s*basic\s+)[A-Za-z0-9+/=]+/giu, '$1[REDACTED]')
+    .replace(/(authorization\s*:\s*(?:basic|bearer)\s+)[^\s,;]+/giu, '$1[REDACTED]')
     .replace(/((?:password|token|secret|api[_-]?key)\s*[=:]\s*)[^\s,;]+/giu, '$1[REDACTED]')
+    .replace(/\b(?:sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16})\b/gu, '[REDACTED]')
     .slice(0, maximum);
 }
 
@@ -249,8 +250,8 @@ export class RunManager {
     if (!adapter) throw new DesktopRunError('ENGINE_UNAVAILABLE', 'El motor OpenCode Desktop no está integrado en esta compilación.');
 
     const key = workspaceKey(input.workspace);
-    if ([...this.active.values()].some((run) => run.workspaceKey === key)) {
-      throw new DesktopRunError('WORKSPACE_BUSY', 'Este workspace ya tiene una ejecución activa.');
+    if (this.active.size > 0) {
+      throw new DesktopRunError('ENGINE_BUSY', 'OpenCode Infinite ya tiene una ejecución activa.');
     }
 
     const operationId = randomUUID();
@@ -289,9 +290,6 @@ export class RunManager {
       completedAt: null,
       lastError: null,
     };
-    this.states.set(runId, state);
-    await this.persist(state);
-
     const controller = new AbortController();
     const active: ActiveRun = {
       controller,
@@ -300,7 +298,15 @@ export class RunManager {
       runId,
       workspaceKey: key,
     };
+    this.states.set(runId, state);
     this.active.set(runId, active);
+    try {
+      await this.persist(state);
+    } catch (error) {
+      this.active.delete(runId);
+      this.states.delete(runId);
+      throw error;
+    }
     this.publishState(state);
     active.promise = this.execute(adapter, input, state, controller.signal)
       .finally(() => this.active.delete(runId));

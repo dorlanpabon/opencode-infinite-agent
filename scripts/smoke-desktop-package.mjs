@@ -80,6 +80,13 @@ try {
   assert.equal(await window.locator('#inspector-panel').isHidden(), true);
   await window.locator('#inspector-tab').click();
   assert.equal(await window.locator('#inspector-panel').isVisible(), true);
+
+  await window.setViewportSize({ width: 924, height: 601 });
+  const minimumFit = await layoutSnapshot(window);
+  assert.equal(minimumFit.canScrollX, false);
+  assert.equal(minimumFit.canScrollY, false);
+  assert.equal(minimumFit.regions.every((region) => region.visible && region.inViewport), true);
+  await window.screenshot({ path: path.join(qaDirectory, 'desktop-minimum.png') });
 } finally {
   await browser?.close().catch(() => undefined);
   await stopDesktop(desktop);

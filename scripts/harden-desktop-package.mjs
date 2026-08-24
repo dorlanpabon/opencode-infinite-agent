@@ -1,4 +1,4 @@
-import { access } from 'node:fs/promises';
+import { access, chmod, stat } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { listPackage } from '@electron/asar';
@@ -20,9 +20,14 @@ const executable = process.platform === 'darwin'
   ? path.join(packageRoot, appBundle, 'Contents', 'MacOS', executableName)
   : path.join(packageRoot, process.platform === 'win32' ? `${executableName}.exe` : executableName);
 await access(executable);
+if (process.platform === 'linux') {
+  const sandbox = path.join(packageRoot, 'chrome-sandbox');
+  await chmod(sandbox, 0o4755);
+  if (((await stat(sandbox)).mode & 0o7777) !== 0o4755) throw new Error('chrome-sandbox no conserva el modo 4755.');
+}
 
 const archiveEntries = new Set(listPackage(path.join(resourcesRoot, 'app.asar')).map((entry) => entry.replaceAll('\\', '/')));
-const allowedRoots = new Set(['dist', 'src', 'bin', 'node_modules', 'package.json', 'README.md', 'SECURITY.md', 'LICENSE']);
+const allowedRoots = new Set(['assets', 'dist', 'node_modules', 'package.json', 'README.md', 'SECURITY.md', 'LICENSE']);
 const allowedModules = new Set(['debug', 'electron-squirrel-startup', 'ms']);
 for (const entry of archiveEntries) {
   const segments = entry.split('/').filter(Boolean);
@@ -31,7 +36,10 @@ for (const entry of archiveEntries) {
   if (archiveRoot === 'node_modules' && segments[1] && !allowedModules.has(segments[1])) {
     throw new Error(`Dependencia inesperada en app.asar: ${entry}.`);
   }
-  if (allowedRoots.has(archiveRoot) && !['dist', 'src', 'bin', 'node_modules'].includes(archiveRoot) && segments.length !== 1) {
+  if (archiveRoot === 'assets' && !['/assets', '/assets/icon.png'].includes(entry)) {
+    throw new Error(`Asset inesperado en app.asar: ${entry}.`);
+  }
+  if (allowedRoots.has(archiveRoot) && !['assets', 'dist', 'node_modules'].includes(archiveRoot) && segments.length !== 1) {
     throw new Error(`Ruta inesperada en app.asar: ${entry}.`);
   }
 }
@@ -43,8 +51,9 @@ for (const required of [
   '/dist/desktop/renderer/app.js',
   '/dist/desktop/renderer/index.html',
   '/dist/desktop/renderer/app.css',
-  '/src/loop.js',
-  '/src/server.js',
+  '/assets/icon.png',
+  '/dist/loop.js',
+  '/dist/server.js',
 ]) {
   if (!archiveEntries.has(required)) throw new Error(`Falta ${required} dentro de app.asar.`);
 }

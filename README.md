@@ -39,7 +39,7 @@ La aplicación busca el binario oficial de OpenCode y también puede adjuntarse 
 4. Opcionalmente define sesión, modelo, agente, límites o servidor local.
 5. Ejecuta el diagnóstico y pulsa **Iniciar supervisor**.
 
-La interfaz muestra el ciclo del turno, estado del stream, sesión, iteración, consumo, historial y logs. Solo permite una ejecución activa por workspace y conserva el estado de forma atómica para recuperarse tras un cierre.
+La interfaz muestra el ciclo del turno, estado del stream, sesión, iteración, consumo, historial y logs. Solo permite una ejecución activa por instancia y conserva el estado de forma atómica para recuperarse tras un cierre. Cada ejecución administrada recibe un servidor y puerto loopback dedicados.
 
 La autoaprobación de permisos está desactivada por defecto y exige una confirmación explícita por ejecución.
 

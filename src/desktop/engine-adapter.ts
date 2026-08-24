@@ -78,17 +78,15 @@ async function doctor(input: DoctorInput): Promise<DoctorResult> {
   } catch (error) {
     warnings.push(error instanceof Error ? error.message : String(error));
   }
-  const endpoint = 'http://127.0.0.1:4567';
-  const version = await serverModule.health(endpoint);
   return {
-    ok: binaryReady || Boolean(version),
-    engineAvailable: binaryReady || Boolean(version),
+    ok: binaryReady,
+    engineAvailable: binaryReady,
     workspaceReady: true,
-    binaryReady: input.binary === null ? null : binaryReady,
+    binaryReady,
     attachReady: null,
-    mode: version ? 'desktop-sidecar' : binaryReady ? 'dedicated' : 'unavailable',
-    serverVersion: version,
-    endpoint: version ? endpoint : null,
+    mode: binaryReady ? 'dedicated' : 'unavailable',
+    serverVersion: null,
+    endpoint: null,
     warnings,
   };
 }
@@ -123,6 +121,8 @@ async function run(input: StartRunInput, context: EngineRunContext): Promise<Eng
       sentinel: input.sentinel,
       noTodos: !input.todoDetection,
       autoApprove: input.autoApprove,
+      keepServer: false,
+      exclusiveServer: input.attach === null,
     }, {
       signal: controller.signal,
       log: logger(context),

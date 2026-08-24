@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-15, ubuntu-24.04, ubuntu-24.04-arm]
+        os: [windows-latest, macos-15, macos-15-intel, ubuntu-24.04, ubuntu-24.04-arm]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -42,6 +42,16 @@ jobs:
         run: node bin/loop-agent.js --version
       - name: Build desktop installers
         run: npm run desktop:make
+      - name: Validate Linux installer sandbox metadata
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mapfile -t debs < <(find out/make -type f -name '*.deb' -print)
+          mapfile -t rpms < <(find out/make -type f -name '*.rpm' -print)
+          test "${#debs[@]}" -eq 1
+          test "${#rpms[@]}" -eq 1
+          dpkg-deb --contents "${debs[0]}" | grep -E -- '^-rwsr-xr-x root/root .*chrome-sandbox$'
+          rpm -qplv "${rpms[0]}" | grep -E -- '^-rwsr-xr-x[.]?[[:space:]]+1[[:space:]]+root[[:space:]]+root[[:space:]].*chrome-sandbox$'
       - name: Configure Linux Chromium sandbox
         if: runner.os == 'Linux'
         shell: bash
