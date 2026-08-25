@@ -46,6 +46,7 @@ export interface SessionConnectionInput {
   workspace: string;
   binary: string | null;
   attach: string | null;
+  sessionRef: string | null;
 }
 
 export type OpenCodeSessionStatus = 'idle' | 'busy' | 'retry';
@@ -298,17 +299,24 @@ export function parseStartRunInput(value: unknown): StartRunInput {
 }
 
 export function parseSessionConnectionInput(value: unknown): SessionConnectionInput {
-  const keys = ['attach', 'binary', 'workspace'];
+  const keys = ['attach', 'binary', 'sessionRef', 'workspace'];
   if (!isRecord(value) || !hasExactKeys(value, keys)
     || typeof value.workspace !== 'string' || value.workspace.trim().length === 0 || value.workspace.length > 32_767
     || !nullableBoundedString(value.binary, 32_767)
-    || !nullableBoundedString(value.attach, 2_048)) {
+    || !nullableBoundedString(value.attach, 2_048)
+    || !nullableBoundedString(value.sessionRef, 2_048)) {
     throw new TypeError('Parámetros de sesiones inválidos.');
+  }
+  const sessionRef = normalizedOptional(value.sessionRef);
+  if (sessionRef !== null && !/^ses_[A-Za-z0-9]+$/u.test(sessionRef)
+    && !/^oc:\/\/[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]+$/u.test(sessionRef)) {
+    throw new TypeError('La sesión debe ser un ID ses_… o un enlace oc:// válido.');
   }
   return {
     workspace: value.workspace.trim(),
     binary: normalizedOptional(value.binary),
     attach: validateLoopbackAttach(value.attach),
+    sessionRef,
   };
 }
 
@@ -332,6 +340,9 @@ export function parseSetContinuousInput(value: unknown): SetContinuousInput {
   const run = parseStartRunInput(value.run);
   if (!run.resumeExisting || run.sessionRef !== sessionId) {
     throw new TypeError('La ejecución continua debe reanudar exactamente la sesión seleccionada.');
+  }
+  if (run.autoApprove) {
+    throw new TypeError('Los permisos de sesiones existentes se confirman directamente en OpenCode Desktop.');
   }
   return { enabled: true, sessionId, run };
 }

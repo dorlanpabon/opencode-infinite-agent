@@ -62,7 +62,7 @@ test('catálogo combina sesiones/status y reconcilia por SSE sin escrituras ni p
   const catalog = new OpenCodeSessionCatalog(() => undefined, { server: api.server, config: api.config });
   const snapshots = [];
   catalog.setListener((sessions) => snapshots.push(sessions));
-  const input = { workspace: 'C:\\workspace', binary: null, attach: null };
+  const input = { workspace: 'C:\\workspace', binary: null, attach: null, sessionRef: null };
   const connected = await catalog.connect(input);
 
   assert.equal(connected.base, 'http://127.0.0.1:45678');
@@ -94,7 +94,7 @@ test('catálogo reemplaza el listener de snapshots en refresh sucesivos', async 
   let currentCalls = 0;
   catalog.setListener(() => { oldCalls++; });
   catalog.setListener(() => { currentCalls++; });
-  await catalog.connect({ workspace: 'C:\\workspace', binary: null, attach: null });
+  await catalog.connect({ workspace: 'C:\\workspace', binary: null, attach: null, sessionRef: null });
   assert.equal(oldCalls, 0);
   assert.equal(currentCalls, 1);
   await catalog.close();
@@ -116,7 +116,7 @@ test('close cancela una conexión pendiente y drena el servidor propio', async (
     startEventStream: () => eventStream(),
   };
   const config = { loadConfig: (input) => ({ ...input }) };
-  const input = { workspace: 'C:\\workspace', binary: null, attach: null };
+  const input = { workspace: 'C:\\workspace', binary: null, attach: null, sessionRef: null };
   const catalog = new OpenCodeSessionCatalog(() => undefined, { server, config });
   const connecting = catalog.connect(input);
   const rejected = assert.rejects(connecting, /cancelada|cerrado/iu);

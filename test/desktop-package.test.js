@@ -7,12 +7,13 @@ const { hardenRpmSpec } = require('../scripts/prepare-linux-rpm-maker.cjs');
 
 const root = path.resolve(__dirname, '..');
 
-test('renderer y ventana Desktop conservan aislamiento estricto', async () => {
-  const [main, preload, renderer, html] = await Promise.all([
+test('renderer, puente y ventana Desktop conservan aislamiento estricto', async () => {
+  const [main, preload, renderer, html, plugin] = await Promise.all([
     readFile(path.join(root, 'dist', 'desktop', 'main.js'), 'utf8'),
     readFile(path.join(root, 'dist', 'desktop', 'preload.cjs'), 'utf8'),
     readFile(path.join(root, 'dist', 'desktop', 'renderer', 'app.js'), 'utf8'),
     readFile(path.join(root, 'dist', 'desktop', 'renderer', 'index.html'), 'utf8'),
+    readFile(path.join(root, 'dist', 'desktop', 'plugin', 'opencode-infinite-bridge.js'), 'utf8'),
   ]);
   assert.match(main, /contextIsolation:\s*true/u);
   assert.match(main, /nodeIntegration:\s*false/u);
@@ -26,6 +27,9 @@ test('renderer y ventana Desktop conservan aislamiento estricto', async () => {
   assert.doesNotMatch(html.match(/id="auto-approve-input"[^>]*>/u)?.[0] ?? '', /\bchecked\b/u);
   assert.doesNotMatch(html.match(/id="task-input"[^>]*>/u)?.[0] ?? '', /\bmaxlength=/u);
   assert.match(html, /id="attachments-picker-button"/u);
+  assert.match(plugin, /OpenCodeInfiniteBridge/u);
+  assert.match(plugin, /127\.0\.0\.1/u);
+  assert.match(plugin, /timingSafeEqual/u);
 });
 
 test('renderer conserva navegación y foco accesibles en sesiones', async () => {
@@ -38,6 +42,8 @@ test('renderer conserva navegación y foco accesibles en sesiones', async () => 
   assert.match(renderer, /Hay otra ejecución activa/u);
   assert.match(renderer, /aria-describedby/u);
   assert.match(renderer, /Coloca el objetivo para activar/u);
+  assert.match(renderer, /autoApproveInput\.disabled\s*=\s*Boolean\(target\)/u);
+  assert.match(renderer, /Confirma los permisos directamente en OpenCode Desktop/u);
   assert.match(renderer, /resolveDroppedAttachments/u);
   assert.match(css, /\.session-item:focus/u);
 });
@@ -48,6 +54,7 @@ test('paquete Electron usa allowlist y makers multiplataforma', () => {
   assert.equal(packagerConfig.name, packagerConfig.executableName);
   assert.match(packagerConfig.icon, /assets[\\/]icon$/u);
   assert.equal(ignored('/dist/desktop/main.js'), false);
+  assert.equal(ignored('/dist/desktop/plugin/opencode-infinite-bridge.js'), false);
   assert.equal(ignored('/assets/icon.png'), false);
   assert.equal(ignored('/assets/icon.svg'), true);
   assert.equal(ignored('/src/server.js'), true);

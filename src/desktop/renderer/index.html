@@ -44,9 +44,9 @@
             <button class="sidebar-tab" id="runs-view-button" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="runs-view">Historial <span class="count" id="run-count">0</span></button>
           </div>
           <section id="sessions-view" role="tabpanel" aria-labelledby="sessions-view-button">
-            <button class="text-button sessions-connect" id="sessions-connect-button" type="button">Conectar servidor…</button>
+            <button class="text-button sessions-connect" id="sessions-connect-button" type="button">Conectar OpenCode Desktop…</button>
             <div class="session-list" id="session-list" aria-label="Sesiones OpenCode" aria-busy="false"></div>
-            <p class="sidebar-empty" id="session-list-empty">Conecta el servidor local usado por OpenCode para ver sus sesiones.</p>
+            <p class="sidebar-empty" id="session-list-empty">Conecta OpenCode Desktop para ver y activar sus sesiones actuales.</p>
           </section>
           <section id="runs-view" role="tabpanel" aria-labelledby="runs-view-button" hidden>
             <nav class="run-list" id="run-list" aria-label="Historial de ejecuciones"></nav>
@@ -266,8 +266,8 @@
             <summary>Conexión y opciones avanzadas</summary>
             <div class="advanced-body">
               <div class="field-grid">
-                <label class="field"><span>Sesión o deeplink</span><input id="session-input" type="text" maxlength="2048" spellcheck="false" placeholder="ses_… u oc://…"></label>
-                <label class="field"><span>Servidor local</span><input id="attach-input" type="url" maxlength="2048" spellcheck="false" placeholder="http://127.0.0.1:4096"></label>
+                <label class="field"><span>Sesión o enlace de OpenCode</span><input id="session-input" type="text" maxlength="2048" spellcheck="false" placeholder="Pega oc://… para adoptar una sesión exacta"></label>
+                <label class="field"><span>Servidor manual (opcional)</span><input id="attach-input" type="url" maxlength="2048" spellcheck="false" placeholder="Vacío = OpenCode Desktop"></label>
                 <label class="field"><span>Modelo</span><input id="model-input" type="text" maxlength="512" spellcheck="false" placeholder="proveedor/modelo"></label>
                 <label class="field"><span>Agente</span><input id="agent-input" type="text" maxlength="256" spellcheck="false" placeholder="Predeterminado"></label>
                 <label class="field field--wide">
@@ -282,7 +282,7 @@
               <fieldset class="options">
                 <legend>Política del ciclo</legend>
                 <label class="check-row"><input id="todos-input" type="checkbox" checked><span><strong>Validar todos</strong><small>Finaliza si toda la lista está completada.</small></span></label>
-                <label class="check-row check-row--danger"><input id="auto-approve-input" type="checkbox"><span><strong>Autoaprobar permisos de esta sesión</strong><small>Nunca se aplica a otras sesiones del sidecar.</small></span></label>
+                <label class="check-row check-row--danger"><input id="auto-approve-input" type="checkbox"><span><strong>Autoaprobar permisos de esta sesión</strong><small id="auto-approve-detail">Se limita a la sesión creada por esta ejecución.</small></span></label>
                 <label class="danger-confirmation" id="auto-approve-confirmation-row" hidden>
                   <input id="auto-approve-confirmation-input" type="checkbox">
                   <span>Entiendo que esta ejecución podrá modificar archivos y ejecutar herramientas sin confirmación individual.</span>

@@ -4,8 +4,49 @@ const path = require('path');
 const { execSync, spawn } = require('child_process');
 const { createServer } = require('net');
 
+const desktopBridgeAuth = new Map();
+
+function loopbackOrigin(base) {
+  let origin;
+  try {
+    origin = new URL(base);
+  } catch {
+    throw new Error(`Origen OpenCode invalido: ${base}`);
+  }
+  const host = origin.hostname.toLowerCase();
+  const loopback = host === 'localhost' || host === '[::1]' || host === '::1' || /^127\./u.test(host);
+  if ((origin.protocol !== 'http:' && origin.protocol !== 'https:') || !loopback) {
+    throw new Error(`Origen OpenCode no permitido: ${origin.origin}`);
+  }
+  return origin.origin;
+}
+
+function registerDesktopBridge(base, token) {
+  if (typeof token !== 'string' || !/^[a-f0-9]{64}$/u.test(token)) {
+    throw new Error('Token de puente Desktop invalido');
+  }
+  desktopBridgeAuth.set(loopbackOrigin(base), token);
+}
+
+function unregisterDesktopBridge(base) {
+  desktopBridgeAuth.delete(loopbackOrigin(base));
+}
+
+function isDesktopBridge(base) {
+  try {
+    return desktopBridgeAuth.has(loopbackOrigin(base));
+  } catch {
+    return false;
+  }
+}
+
 function authHeaders(base) {
   if (!base) throw new Error('authHeaders requiere el origen base');
+  let bridgeToken;
+  try {
+    bridgeToken = desktopBridgeAuth.get(loopbackOrigin(base));
+  } catch {}
+  if (bridgeToken) return { Authorization: `Bearer ${bridgeToken}` };
   const pass = process.env.OPENCODE_SERVER_PASSWORD;
   if (!pass) return {};
   let origin;
@@ -26,12 +67,19 @@ function authHeaders(base) {
   return { Authorization: 'Basic ' + Buffer.from(`${user}:${pass}`).toString('base64') };
 }
 
+function transportDirectory(directory) {
+  if (!directory) return directory;
+  const value = String(directory);
+  return /^[A-Za-z]:[\\/]/u.test(value) ? value.replace(/\\/gu, '/') : value;
+}
+
 function scopedRequest(base, method, pathName, directory) {
   const url = new URL(pathName, `${base.replace(/\/$/, '')}/`);
   const headers = {};
   if (directory) {
-    if (method === 'GET' || method === 'HEAD') url.searchParams.set('directory', directory);
-    else headers['x-opencode-directory'] = encodeURIComponent(directory);
+    const normalized = transportDirectory(directory);
+    if (method === 'GET' || method === 'HEAD') url.searchParams.set('directory', normalized);
+    else headers['x-opencode-directory'] = encodeURIComponent(normalized);
   }
   return { url: url.toString(), headers };
 }
@@ -752,6 +800,9 @@ function startPermissionApprover({
 }
 
 module.exports = {
+  registerDesktopBridge,
+  unregisterDesktopBridge,
+  isDesktopBridge,
   request,
   health,
   findAvailableLoopbackPort,

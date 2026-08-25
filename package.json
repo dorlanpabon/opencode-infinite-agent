@@ -1,6 +1,6 @@
 {
   "name": "opencode-infinite-agent",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "productName": "OpenCode Infinite",
   "description": "Event-driven desktop supervisor that continues OpenCode sessions until verified completion",
   "author": "dorlanpabon",
@@ -40,6 +40,7 @@
     "desktop:dev": "npm run build && electron-forge start",
     "desktop:package": "npm run build && node scripts/package-desktop.mjs && node scripts/harden-desktop-package.mjs",
     "desktop:smoke": "node scripts/smoke-desktop-package.mjs",
+    "desktop:qa-session": "npm run build --silent && node scripts/qa-desktop-session.mjs",
     "desktop:smoke:native": "node scripts/smoke-native-artifacts.mjs",
     "desktop:make": "npm run desktop:package && electron-forge make --skip-package",
     "prepack": "npm run build"

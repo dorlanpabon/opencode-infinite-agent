@@ -30,25 +30,25 @@ Cada release incluye `SHA256SUMS.txt`. Las versiones preliminares no están firm
 - Para desarrollo: Node.js 22 LTS y npm.
 - El workspace debe permitir las herramientas que la tarea necesite.
 
-La aplicación busca el binario oficial de OpenCode y también puede adjuntarse a un servidor local existente. Por seguridad, solo acepta orígenes loopback (`127.0.0.1`, `localhost` o `::1`) sin credenciales en la URL.
+La aplicación se integra con el proceso propietario de OpenCode Desktop mediante un plugin local autenticado y también puede adjuntarse manualmente a un servidor existente. Por seguridad, solo acepta orígenes loopback (`127.0.0.1`, `localhost` o `::1`) sin credenciales en la URL.
 
 ## Uso de escritorio
 
-1. Abre **OpenCode Infinite**.
-2. Selecciona **Nueva ejecución**.
-3. Escribe el objetivo sin un límite artificial de caracteres y elige el workspace.
-4. Opcionalmente adjunta varios archivos de texto, PNG, JPEG, GIF, WebP o PDF (20 MiB en total), o define sesión, modelo, agente, límites o servidor local.
-5. Ejecuta el diagnóstico y pulsa **Iniciar supervisor**.
+1. Abre primero **OpenCode Desktop** y luego **OpenCode Infinite**.
+2. En **Sesiones**, pulsa **Conectar OpenCode Desktop**. La primera vez se instalará la integración local y se pedirá reiniciar OpenCode Desktop una sola vez.
+3. Puedes pegar un enlace `oc://…/session/ses_…` para localizar una sesión exacta, incluso si pertenece a otro workspace.
+4. Activa **Continuar hasta terminar**, coloca el objetivo sin un límite artificial de caracteres y adjunta los archivos necesarios.
+5. Para una tarea nueva, usa **Nueva ejecución**, elige el workspace y pulsa **Iniciar supervisor**.
 
-La interfaz muestra el ciclo del turno, estado del stream, sesión, iteración, consumo, historial y logs. Solo permite una ejecución activa por instancia y conserva el estado de forma atómica para recuperarse tras un cierre. Si no se adjunta a un servidor existente, la instancia usa un servidor loopback local compartido por el catálogo y la ejecución activa.
+La interfaz muestra el ciclo del turno, estado del stream, sesión, iteración, consumo, historial y logs. Solo permite una ejecución activa por instancia y conserva el estado de forma atómica para recuperarse tras un cierre. Las tareas nuevas usan un servidor dedicado; las sesiones existentes continúan dentro del sidecar que realmente las posee.
 
-La autoaprobación de permisos está desactivada por defecto y exige una confirmación explícita por ejecución.
+La autoaprobación de permisos está desactivada por defecto y exige una confirmación explícita para tareas nuevas. En sesiones existentes de OpenCode Desktop, los permisos siempre se confirman dentro de OpenCode.
 
 ### Sesiones activas
 
-La pestaña **Sesiones** consulta las sesiones del servidor local conectado, combina `GET /session` y `GET /session/status` y se mantiene al día con el stream SSE. El interruptor **Continuar hasta terminar** abre **Coloca el objetivo para activar**, donde puedes definir el nuevo objetivo y adjuntar archivos. Si la sesión está ocupada, espera a que el turno actual sea terminal y quede `idle`; entonces vuelve a comprobar los archivos, envía el objetivo una sola vez y continúa únicamente después de cada parada real. Los adjuntos solo viajan con ese primer objetivo. Los temporizadores siguen siendo límites de seguridad y nunca envían prompts.
+La pestaña **Sesiones** agrega las sesiones raíz actuales de todos los proyectos cargados en OpenCode Desktop, combina el catálogo y los estados del SDK propietario y se mantiene al día con SSE. El interruptor **Continuar hasta terminar** abre **Coloca el objetivo para activar**, donde puedes definir el nuevo objetivo y adjuntar archivos. Si la sesión está ocupada, espera a que el turno actual sea terminal y quede `idle`; entonces vuelve a comprobar los archivos, envía el objetivo una sola vez y continúa únicamente después de cada parada real. Los adjuntos solo viajan con ese primer objetivo. Los temporizadores siguen siendo límites de seguridad y nunca envían prompts.
 
-Desactivar el interruptor libera el supervisor local sin llamar a `/abort`, por lo que no cancela el trabajo remoto. Solo puede haber una sesión supervisada por instancia. El catálogo cubre el servidor compartido administrado por OpenCode Infinite o un servidor loopback adjuntado explícitamente; un sidecar privado de OpenCode Desktop no es visible sin su puerto y credenciales.
+Desactivar el interruptor libera el supervisor local sin llamar a `/abort`, por lo que no cancela el trabajo de OpenCode. Solo puede haber una sesión supervisada por instancia. La integración descubre cada sidecar sin mostrar ni guardar sus credenciales privadas en el historial de la aplicación, usa el workspace real persistido en la sesión y enruta todas las operaciones al proceso propietario.
 
 ## Máquina de estados
 
@@ -117,7 +117,8 @@ Las sesiones creadas antes de un *wrap* incompatible de IDs fallan de forma segu
 - El servidor administrado escucha solo en loopback.
 - Las credenciales Basic Auth nunca se envían a un host remoto.
 - Cada solicitud y el stream adjunto se enrutan al workspace exacto seleccionado.
-- La autoaprobación filtra por el ID exacto de la sesión, reconcilia respuestas ambiguas y se cancela con la ejecución.
+- Cada puente de OpenCode Desktop escucha en un puerto aleatorio de `127.0.0.1`, exige un token aleatorio y solo expone las operaciones necesarias del SDK propietario.
+- La autoaprobación de tareas nuevas filtra por el ID exacto de la sesión, reconcilia respuestas ambiguas y se cancela con la ejecución; no se intenta eludir el diálogo de permisos de OpenCode Desktop.
 - Desktop ignora binarios definidos por el workspace salvo que el usuario seleccione uno explícitamente.
 - Electron usa aislamiento de contexto, sandbox, CSP estricta, navegación bloqueada y un puente IPC mínimo con validación de entradas.
 - Los logs eliminan secretos y no se guardan credenciales en el estado de ejecución.
@@ -154,6 +155,8 @@ src/desktop/main.ts             proceso principal Electron
 src/desktop/engine-adapter.ts   adaptador in-process al motor
 src/desktop/run-manager.ts      persistencia y exclusión global de ejecución
 src/desktop/session-catalog.ts  catálogo de sesiones reconciliado por SSE
+src/desktop/desktop-bridge.ts   descubrimiento autenticado de sidecars Desktop
+src/desktop/plugin/             puente ejecutado dentro de OpenCode Desktop
 src/desktop/renderer/           interfaz de usuario
 ```
 

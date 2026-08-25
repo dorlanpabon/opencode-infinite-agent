@@ -153,6 +153,7 @@ const ui = {
   binaryPickerButton: element<HTMLButtonElement>('binary-picker-button'),
   todosInput: element<HTMLInputElement>('todos-input'),
   autoApproveInput: element<HTMLInputElement>('auto-approve-input'),
+  autoApproveDetail: element<HTMLElement>('auto-approve-detail'),
   autoApproveConfirmationRow: element<HTMLElement>('auto-approve-confirmation-row'),
   autoApproveConfirmationInput: element<HTMLInputElement>('auto-approve-confirmation-input'),
   dialogDoctorButton: element<HTMLButtonElement>('dialog-doctor-button'),
@@ -649,6 +650,10 @@ function openRunDialog(target: OpenCodeSessionSummary | null = null): void {
   ui.limitsFields.hidden = false;
   ui.sessionInput.readOnly = Boolean(target);
   ui.advancedSettings.open = Boolean(target);
+  ui.autoApproveInput.disabled = Boolean(target);
+  ui.autoApproveDetail.textContent = target
+    ? 'Confirma los permisos directamente en OpenCode Desktop.'
+    : 'Se limita a la sesión creada por esta ejecución.';
   if (target) {
     ui.dialogTitle.textContent = 'Coloca el objetivo para activar';
     ui.dialogDescription.textContent = 'El objetivo se añadirá a esta sesión cuando su turno actual se detenga de verdad.';
@@ -682,8 +687,8 @@ function openConnectionDialog(): void {
   ui.sessionInput.readOnly = false;
   ui.sessionInput.value = '';
   ui.advancedSettings.open = true;
-  ui.dialogTitle.textContent = 'Conectar sesiones';
-  ui.dialogDescription.textContent = 'Usa el mismo workspace y servidor local que OpenCode.';
+  ui.dialogTitle.textContent = 'Conectar OpenCode Desktop';
+  ui.dialogDescription.textContent = 'Detecta las sesiones reales del sidecar. También puedes pegar un enlace oc:// para adoptar una sesión exacta.';
   ui.runSubmitButton.textContent = 'Ver sesiones';
   updateAutoApprove();
   setFormError(null);
@@ -722,6 +727,7 @@ function connectionInput(): SessionConnectionInput {
     workspace: ui.workspaceInput.value.trim(),
     binary: ui.binaryInput.value.trim() || null,
     attach: ui.attachInput.value.trim() || null,
+    sessionRef: ui.sessionInput.value.trim() || null,
   };
 }
 
@@ -731,7 +737,9 @@ async function loadSessions(input: SessionConnectionInput, showToast = true): Pr
     const next = await api.listSessions(input);
     sessionConnection = input;
     sessions = next;
-    ui.sessionsConnectButton.textContent = 'Servidor conectado · Cambiar…';
+    ui.sessionsConnectButton.textContent = input.attach
+      ? 'Servidor manual conectado · Cambiar…'
+      : 'OpenCode Desktop conectado · Cambiar…';
     render();
     if (showToast) toast(`${next.length} sesiones cargadas.`);
   } finally {
@@ -772,7 +780,6 @@ async function submitRun(event: SubmitEvent): Promise<void> {
     const state = await api.getRun(receipt.runId);
     upsertRun(state);
     render();
-    void loadSessions(sessionConnection, false).catch((error) => appendLog('warn', `Sesiones: ${errorText(error)}`));
   } catch (error) {
     if (activationTarget) pendingSessionModes.delete(activationTarget.id);
     const message = errorText(error);
@@ -1042,7 +1049,7 @@ async function initialize(): Promise<void> {
     render();
     const basis = runs[0];
     if (basis) {
-      const input = { workspace: basis.workspace, binary: basis.binary, attach: basis.attach };
+      const input = { workspace: basis.workspace, binary: basis.binary, attach: basis.attach, sessionRef: basis.sessionRef };
       void loadSessions(input, false).catch((error) => appendLog('warn', `Sesiones: ${errorText(error)}`));
     }
   } catch (error) {
