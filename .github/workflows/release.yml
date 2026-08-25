@@ -105,6 +105,8 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     env:
       RELEASE_TAG: ${{ github.ref_name }}
     steps:
@@ -122,6 +124,12 @@ jobs:
           merge-multiple: true
       - name: Verify complete release and checksums
         run: node scripts/verify-release-assets.mjs
+
+      - name: Attest release assets
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: release-assets/*
+
       - name: Create or update release
         env:
           GH_TOKEN: ${{ github.token }}

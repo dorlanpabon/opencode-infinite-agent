@@ -24,6 +24,8 @@ Los instaladores de cada versión están en [GitHub Releases](https://github.com
 
 La versión estable `2.4.0` se distribuye sin certificado comercial de Windows ni firma o notarización de Apple. SmartScreen o Gatekeeper pueden mostrar una advertencia. Comprueba siempre `SHA256SUMS.txt` antes de instalar.
 
+Cada artefacto y `SHA256SUMS.txt` incluye procedencia firmada por GitHub/Sigstore. Puedes verificarla con `gh attestation verify <archivo> -R dorlanpabon/opencode-infinite-agent`; esto acredita el workflow y commit de origen, pero no reemplaza Authenticode ni la notarización de Apple.
+
 ## Requisitos
 
 - OpenCode instalado y autenticado en el equipo.
