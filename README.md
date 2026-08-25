@@ -36,8 +36,8 @@ La aplicación busca el binario oficial de OpenCode y también puede adjuntarse 
 
 1. Abre **OpenCode Infinite**.
 2. Selecciona **Nueva ejecución**.
-3. Escribe la tarea y elige el workspace.
-4. Opcionalmente define sesión, modelo, agente, límites o servidor local.
+3. Escribe el objetivo sin un límite artificial de caracteres y elige el workspace.
+4. Opcionalmente adjunta varios archivos de texto, PNG, JPEG, GIF, WebP o PDF (20 MiB en total), o define sesión, modelo, agente, límites o servidor local.
 5. Ejecuta el diagnóstico y pulsa **Iniciar supervisor**.
 
 La interfaz muestra el ciclo del turno, estado del stream, sesión, iteración, consumo, historial y logs. Solo permite una ejecución activa por instancia y conserva el estado de forma atómica para recuperarse tras un cierre. Si no se adjunta a un servidor existente, la instancia usa un servidor loopback local compartido por el catálogo y la ejecución activa.
@@ -46,7 +46,7 @@ La autoaprobación de permisos está desactivada por defecto y exige una confirm
 
 ### Sesiones activas
 
-La pestaña **Sesiones** consulta las sesiones del servidor local conectado, combina `GET /session` y `GET /session/status` y se mantiene al día con el stream SSE. El interruptor **Continuar hasta terminar** adopta una sesión existente sin repetir la tarea original: espera a que el turno actual sea terminal y la sesión quede `idle` antes de decidir si necesita una continuación. Los temporizadores siguen siendo límites de seguridad y nunca envían prompts.
+La pestaña **Sesiones** consulta las sesiones del servidor local conectado, combina `GET /session` y `GET /session/status` y se mantiene al día con el stream SSE. El interruptor **Continuar hasta terminar** abre **Coloca el objetivo para activar**, donde puedes definir el nuevo objetivo y adjuntar archivos. Si la sesión está ocupada, espera a que el turno actual sea terminal y quede `idle`; entonces vuelve a comprobar los archivos, envía el objetivo una sola vez y continúa únicamente después de cada parada real. Los adjuntos solo viajan con ese primer objetivo. Los temporizadores siguen siendo límites de seguridad y nunca envían prompts.
 
 Desactivar el interruptor libera el supervisor local sin llamar a `/abort`, por lo que no cancela el trabajo remoto. Solo puede haber una sesión supervisada por instancia. El catálogo cubre el servidor compartido administrado por OpenCode Infinite o un servidor loopback adjuntado explícitamente; un sidecar privado de OpenCode Desktop no es visible sin su puerto y credenciales.
 

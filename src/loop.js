@@ -1,4 +1,5 @@
 const { randomUUID } = require('node:crypto');
+const { pathToFileURL } = require('node:url');
 const { assistantText, hasSentinel, todosDone, excerpt, messageError, usageOf } = require('./detect');
 const { continuationPrompt } = require('./session');
 const {
@@ -33,11 +34,17 @@ function sleepAbortable(ms, flag) {
   });
 }
 
-function buildMessageBody(cfg, text) {
+function buildMessageBody(cfg, text, attachments = []) {
   const marker = `<!-- opencode-infinite-agent-turn:${randomUUID()} -->`;
   const body = {
     parts: [
       { type: 'text', text },
+      ...attachments.map((attachment) => ({
+        type: 'file',
+        mime: attachment.mime,
+        filename: attachment.name,
+        url: pathToFileURL(attachment.path).href,
+      })),
       { type: 'text', text: marker, synthetic: true, ignored: true },
     ],
   };
@@ -83,7 +90,11 @@ async function awaitTicket(ticket, flag) {
   }
 }
 
-async function exchange(req, sessionId, text, cfg, flag, monitor, log, { adoptRunning = false } = {}) {
+async function exchange(req, sessionId, text, cfg, flag, monitor, log, {
+  adoptRunning = false,
+  attachments = [],
+  beforeSend,
+} = {}) {
   let mayAdoptRunning = Boolean(adoptRunning);
   for (;;) {
     if (flag.aborted) throw new LoopAborted();
@@ -162,10 +173,11 @@ async function exchange(req, sessionId, text, cfg, flag, monitor, log, { adoptRu
       throw new Error('No se pudo confirmar que la sesion esta idle; no se envio otro prompt');
     }
 
-    const body = buildMessageBody(cfg, text);
+    if (beforeSend) await beforeSend();
+    const body = buildMessageBody(cfg, text, attachments);
     const ticket = monitor.waitForTerminal({
       knownMessageIds: baselineIds,
-      expectedUserParts: body.parts,
+      expectedUserParts: body.parts.filter((part) => part.type === 'text'),
       timeoutMs: cfg.stallTimeoutMs,
       hardTimeoutMs: cfg.turnHardTimeoutMs,
       signal: flag.signal,
@@ -216,7 +228,20 @@ async function existingCompletion(req, sessionId, cfg, monitor, log) {
 }
 
 // motor principal: itera hasta sentinel / todos completos / limites
-async function runLoop({ req, sessionId, cfg, firstPrompt, flag, log, eventStream, onState, resumeExisting = false }) {
+async function runLoop({
+  req,
+  sessionId,
+  cfg,
+  firstPrompt,
+  firstAttachments = [],
+  flag,
+  log,
+  eventStream,
+  onState,
+  resumeExisting = false,
+  replaceObjective = false,
+  beforeFirstPrompt,
+}) {
   const state = {
     startedAt: Date.now(),
     iterations: 0,
@@ -239,7 +264,7 @@ async function runLoop({ req, sessionId, cfg, firstPrompt, flag, log, eventStrea
   log.banner(`LOOP INFINITO INICIADO | sesion ${sessionId} | max ${cfg.maxIterations} iteraciones`);
 
   try {
-    if (resumeExisting) {
+    if (resumeExisting && !replaceObjective) {
       const existing = await existingCompletion(req, sessionId, cfg, monitor, log);
       if (existing) {
         state.lastText = existing.text;
@@ -260,7 +285,9 @@ async function runLoop({ req, sessionId, cfg, firstPrompt, flag, log, eventStrea
         attempt++;
         try {
           reply = await exchange(req, sessionId, prompt, cfg, flag, monitor, log, {
-            adoptRunning: resumeExisting && i === 1,
+            adoptRunning: resumeExisting && !replaceObjective && i === 1,
+            attachments: i === 1 ? firstAttachments : [],
+            beforeSend: i === 1 ? beforeFirstPrompt : undefined,
           });
         } catch (e) {
           if (e instanceof LoopAborted || flag.aborted) throw new LoopAborted();

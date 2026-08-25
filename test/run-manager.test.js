@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
-const { mkdtemp, mkdir, rm } = require('node:fs/promises');
+const { randomUUID } = require('node:crypto');
+const { mkdtemp, mkdir, rm, writeFile } = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
@@ -7,7 +8,7 @@ const { RunManager, safeText } = require('../dist/desktop/run-manager.js');
 
 function input(workspace) {
   return {
-    task: 'Verifica la ejecución', workspace, name: null, sessionRef: null, model: null, agent: null,
+    task: 'Verifica la ejecución', attachments: [], workspace, name: null, sessionRef: null, model: null, agent: null,
     binary: null, attach: null, maxIterations: 5, maxHours: 1, stallMinutes: 1,
     sentinel: '[TASK_COMPLETE]', todoDetection: true, autoApprove: false, autoApproveConfirmation: false,
     resumeExisting: false,
@@ -19,6 +20,53 @@ test('safeText elimina credenciales comunes de logs y errores', () => {
   assert.equal(value.includes('abc.def.ghi'), false);
   assert.equal(value.includes('visible'), false);
   assert.equal(value.includes('sk-1234567890abcdefghijklmnop'), false);
+});
+
+test('RunManager migra historial schema 1 sin adjuntos', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'opencode-infinite-migration-'));
+  const workspace = path.join(root, 'workspace');
+  const runsDirectory = path.join(root, 'runs');
+  await mkdir(workspace);
+  await mkdir(runsDirectory);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const runId = randomUUID();
+  const now = new Date().toISOString();
+  await writeFile(path.join(runsDirectory, `${runId}.json`), JSON.stringify({
+    schemaVersion: 1,
+    runId,
+    operationId: randomUUID(),
+    task: 'Objetivo histórico',
+    workspace,
+    name: 'Histórica',
+    sessionRef: null,
+    sessionId: null,
+    model: null,
+    agent: null,
+    binary: null,
+    attach: null,
+    status: 'stopped',
+    reason: 'Detenida',
+    iteration: 0,
+    maxIterations: 5,
+    maxHours: 1,
+    stallMinutes: 1,
+    sentinel: '[TASK_COMPLETE]',
+    todoDetection: true,
+    autoApprove: false,
+    sseState: 'closed',
+    tokensInput: 0,
+    tokensOutput: 0,
+    cost: 0,
+    lastMessage: null,
+    lastEvent: null,
+    createdAt: now,
+    updatedAt: now,
+    completedAt: now,
+    lastError: null,
+  }));
+  const manager = new RunManager(() => undefined, root, null);
+  await manager.initialize();
+  assert.deepEqual((await manager.listRuns())[0].attachments, []);
 });
 
 test('RunManager persiste progreso y finalización del adaptador real boundary', async (t) => {

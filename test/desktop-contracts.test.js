@@ -9,6 +9,7 @@ const {
 
 const valid = {
   task: 'Termina la tarea y verifica el resultado',
+  attachments: [],
   workspace: 'C:\\workspace',
   name: null,
   sessionRef: null,
@@ -26,8 +27,11 @@ const valid = {
   resumeExisting: false,
 };
 
-test('contratos Desktop aceptan inputs exactos y acotados', () => {
+test('contratos Desktop aceptan inputs exactos y objetivo sin límite artificial', () => {
   assert.deepEqual(parseStartRunInput(valid), valid);
+  assert.equal(parseStartRunInput({ ...valid, task: 'x'.repeat(80_000) }).task.length, 80_000);
+  const attachment = { path: 'C:\\workspace\\brief.pdf', name: 'brief.pdf', mime: 'application/pdf', size: 1024 };
+  assert.deepEqual(parseStartRunInput({ ...valid, attachments: [attachment] }).attachments, [attachment]);
   assert.deepEqual(parseDoctorInput({ workspace: null, binary: null, attach: null }), {
     workspace: null,
     binary: null,
@@ -61,4 +65,5 @@ test('contratos Desktop rechazan campos extra, attach remoto y auto-approve sin 
   assert.throws(() => parseStartRunInput({ ...valid, extra: true }), /inválidos/iu);
   assert.throws(() => parseStartRunInput({ ...valid, attach: 'https://example.com' }), /loopback/iu);
   assert.throws(() => parseStartRunInput({ ...valid, autoApprove: true }), /confirma/iu);
+  assert.throws(() => parseStartRunInput({ ...valid, attachments: [{ path: 'brief.pdf' }] }), /adjuntos/iu);
 });

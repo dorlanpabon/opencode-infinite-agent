@@ -4,6 +4,7 @@ import type {
   DoctorResult,
   LogLevel,
   OpenCodeSessionSummary,
+  RunAttachment,
   RunState,
   RunStatus,
   SessionConnectionInput,
@@ -130,6 +131,11 @@ const ui = {
   taskInput: element<HTMLTextAreaElement>('task-input'),
   taskField: element<HTMLElement>('task-field'),
   taskCount: element<HTMLElement>('task-count'),
+  attachmentsField: element<HTMLElement>('attachments-field'),
+  attachmentsPickerButton: element<HTMLButtonElement>('attachments-picker-button'),
+  attachmentDropZone: element<HTMLElement>('attachment-drop-zone'),
+  attachmentList: element<HTMLUListElement>('attachment-list'),
+  attachmentEmpty: element<HTMLElement>('attachment-empty'),
   workspaceInput: element<HTMLInputElement>('workspace-input'),
   workspacePickerButton: element<HTMLButtonElement>('workspace-picker-button'),
   nameInput: element<HTMLInputElement>('name-input'),
@@ -167,6 +173,8 @@ let doctorResult: DoctorResult | null = null;
 let sessionConnection: SessionConnectionInput | null = null;
 let dialogMode: 'new' | 'connect' | 'activate' = 'new';
 let activationTarget: OpenCodeSessionSummary | null = null;
+let selectedAttachments: RunAttachment[] = [];
+let isWindows = false;
 const pendingSessionModes = new Map<string, boolean>();
 
 function selectedRun(): RunState | null {
@@ -181,6 +189,12 @@ function errorText(error: unknown): string {
 
 function formatInteger(value: number): string {
   return new Intl.NumberFormat('es-CO', { maximumFractionDigits: 0 }).format(value);
+}
+
+function formatBytes(value: number): string {
+  if (value < 1_024) return `${formatInteger(value)} B`;
+  if (value < 1_024 * 1_024) return `${(value / 1_024).toFixed(1)} KiB`;
+  return `${(value / (1_024 * 1_024)).toFixed(1)} MiB`;
 }
 
 function formatDate(value: string): string {
@@ -262,6 +276,53 @@ function renderLogs(): void {
   ui.logCount.textContent = String(logs.length);
   ui.logsEmpty.hidden = logs.length > 0;
   if (logs.length > 0) ui.logList.scrollTop = ui.logList.scrollHeight;
+}
+
+function attachmentKey(attachment: RunAttachment): string {
+  return isWindows ? attachment.path.toLowerCase() : attachment.path;
+}
+
+function renderAttachments(): void {
+  const fragment = document.createDocumentFragment();
+  for (const attachment of selectedAttachments) {
+    const item = document.createElement('li');
+    item.className = 'attachment-item';
+    const content = document.createElement('span');
+    const name = document.createElement('strong');
+    name.textContent = attachment.name;
+    name.title = attachment.path;
+    const detail = document.createElement('small');
+    detail.textContent = `${formatBytes(attachment.size)} · ${attachment.mime}`;
+    content.append(name, detail);
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'attachment-remove';
+    remove.textContent = 'Quitar';
+    remove.setAttribute('aria-label', `Quitar ${attachment.name}`);
+    remove.addEventListener('click', () => {
+      selectedAttachments = selectedAttachments.filter((candidate) => attachmentKey(candidate) !== attachmentKey(attachment));
+      renderAttachments();
+      announce(`${attachment.name} eliminado de los adjuntos.`);
+    });
+    item.append(content, remove);
+    fragment.append(item);
+  }
+  ui.attachmentList.replaceChildren(fragment);
+  ui.attachmentEmpty.hidden = selectedAttachments.length > 0;
+}
+
+function mergeAttachments(next: RunAttachment[]): void {
+  const merged = new Map(selectedAttachments.map((attachment) => [attachmentKey(attachment), attachment]));
+  for (const attachment of next) merged.set(attachmentKey(attachment), attachment);
+  const values = [...merged.values()];
+  if (values.length > 100) throw new Error('Se admiten hasta 100 archivos adjuntos.');
+  if (values.reduce((total, attachment) => total + attachment.size, 0) > 20 * 1024 * 1024) {
+    throw new Error('Los adjuntos superan 20 MiB en total.');
+  }
+  selectedAttachments = values;
+  renderAttachments();
+  setFormError(null);
+  announce(`${formatInteger(next.length)} archivo${next.length === 1 ? '' : 's'} añadido${next.length === 1 ? '' : 's'}.`);
 }
 
 function upsertRun(run: RunState): void {
@@ -572,19 +633,27 @@ function applyDialogConnection(): void {
   ui.attachInput.value = attach ?? '';
 }
 
+function updateTaskCount(): void {
+  ui.taskCount.textContent = `${formatInteger(ui.taskInput.value.length)} caracteres · sin límite de la app`;
+}
+
 function openRunDialog(target: OpenCodeSessionSummary | null = null): void {
   dialogMode = target ? 'activate' : 'new';
   activationTarget = target;
   ui.form.reset();
+  selectedAttachments = [];
+  renderAttachments();
   applyDialogConnection();
-  ui.taskField.hidden = Boolean(target);
+  ui.taskField.hidden = false;
+  ui.attachmentsField.hidden = false;
   ui.limitsFields.hidden = false;
   ui.sessionInput.readOnly = Boolean(target);
   ui.advancedSettings.open = Boolean(target);
   if (target) {
-    ui.dialogTitle.textContent = 'Activar modo continuo';
-    ui.dialogDescription.textContent = 'El supervisor adoptará esta sesión y solo continuará después de su parada real.';
-    ui.taskInput.value = `Continuar hasta finalizar: ${target.title}`;
+    ui.dialogTitle.textContent = 'Coloca el objetivo para activar';
+    ui.dialogDescription.textContent = 'El objetivo se añadirá a esta sesión cuando su turno actual se detenga de verdad.';
+    ui.taskInput.value = '';
+    ui.workspaceInput.value = target.workspace;
     ui.nameInput.value = target.title;
     ui.sessionInput.value = target.id;
     ui.runSubmitButton.textContent = 'Activar modo continuo';
@@ -594,11 +663,11 @@ function openRunDialog(target: OpenCodeSessionSummary | null = null): void {
     ui.taskInput.value = '';
     ui.runSubmitButton.textContent = 'Iniciar supervisor';
   }
-  ui.taskCount.textContent = `${ui.taskInput.value.length} / 8000`;
+  updateTaskCount();
   updateAutoApprove();
   setFormError(null);
   if (!ui.runDialog.open) ui.runDialog.showModal();
-  window.setTimeout(() => (target ? ui.maxIterationsInput : ui.taskInput).focus(), 0);
+  window.setTimeout(() => ui.taskInput.focus(), 0);
 }
 
 function openConnectionDialog(): void {
@@ -608,6 +677,7 @@ function openConnectionDialog(): void {
   applyDialogConnection();
   ui.taskInput.value = 'Conectar catálogo de sesiones';
   ui.taskField.hidden = true;
+  ui.attachmentsField.hidden = true;
   ui.limitsFields.hidden = true;
   ui.sessionInput.readOnly = false;
   ui.sessionInput.value = '';
@@ -628,6 +698,7 @@ function closeRunDialog(): void {
 function startInput(): StartRunInput {
   return {
     task: ui.taskInput.value.trim(),
+    attachments: structuredClone(selectedAttachments),
     workspace: ui.workspaceInput.value.trim(),
     name: ui.nameInput.value.trim() || null,
     sessionRef: ui.sessionInput.value.trim() || null,
@@ -761,6 +832,36 @@ async function chooseBinary(): Promise<void> {
   }
 }
 
+async function chooseAttachments(): Promise<void> {
+  ui.attachmentsPickerButton.disabled = true;
+  try {
+    const attachments = await api.chooseAttachments();
+    if (attachments.length > 0) mergeAttachments(attachments);
+  } catch (error) {
+    const message = errorText(error);
+    setFormError(message);
+    announce('No se pudieron adjuntar los archivos.');
+  } finally {
+    ui.attachmentsPickerButton.disabled = false;
+  }
+}
+
+async function addDroppedAttachments(files: File[]): Promise<void> {
+  if (files.length === 0) return;
+  ui.attachmentDropZone.setAttribute('aria-busy', 'true');
+  try {
+    const attachments = await api.resolveDroppedAttachments(files);
+    if (attachments.length > 0) mergeAttachments(attachments);
+  } catch (error) {
+    const message = errorText(error);
+    setFormError(message);
+    announce('No se pudieron adjuntar los archivos soltados.');
+  } finally {
+    ui.attachmentDropZone.removeAttribute('aria-busy');
+    ui.attachmentDropZone.dataset.dragging = 'false';
+  }
+}
+
 async function stopSelectedRun(): Promise<void> {
   const run = selectedRun();
   if (!run || !ACTIVE_STATUSES.has(run.status)) return;
@@ -871,11 +972,34 @@ function wireEvents(): () => void {
   ui.dialogCloseButton.addEventListener('click', closeRunDialog);
   ui.dialogCancelButton.addEventListener('click', closeRunDialog);
   ui.form.addEventListener('submit', (event) => { void submitRun(event); });
-  ui.taskInput.addEventListener('input', () => {
-    ui.taskCount.textContent = `${ui.taskInput.value.length} / 8000`;
-  });
+  ui.taskInput.addEventListener('input', updateTaskCount);
   ui.workspacePickerButton.addEventListener('click', () => { void chooseWorkspace(); });
   ui.binaryPickerButton.addEventListener('click', () => { void chooseBinary(); });
+  ui.attachmentsPickerButton.addEventListener('click', () => { void chooseAttachments(); });
+  ui.attachmentDropZone.addEventListener('click', () => { void chooseAttachments(); });
+  ui.attachmentDropZone.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    void chooseAttachments();
+  });
+  ui.attachmentDropZone.addEventListener('dragenter', (event) => {
+    event.preventDefault();
+    ui.attachmentDropZone.dataset.dragging = 'true';
+  });
+  ui.attachmentDropZone.addEventListener('dragover', (event) => {
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+    ui.attachmentDropZone.dataset.dragging = 'true';
+  });
+  ui.attachmentDropZone.addEventListener('dragleave', () => {
+    ui.attachmentDropZone.dataset.dragging = 'false';
+  });
+  ui.attachmentDropZone.addEventListener('drop', (event) => {
+    event.preventDefault();
+    void addDroppedAttachments(Array.from(event.dataTransfer?.files ?? []));
+  });
+  document.addEventListener('dragover', (event) => event.preventDefault());
+  document.addEventListener('drop', (event) => event.preventDefault());
   ui.autoApproveInput.addEventListener('change', updateAutoApprove);
   ui.doctorButton.addEventListener('click', () => { void runDoctor(); });
   ui.inspectorDoctorButton.addEventListener('click', () => { void runDoctor(); });
@@ -905,6 +1029,7 @@ async function initialize(): Promise<void> {
   renderLogs();
   try {
     const info = await api.systemInfo();
+    isWindows = info.platform === 'win32';
     ui.appVersion.textContent = `v${info.version} · ${info.platform}/${info.arch}`;
     ui.newRunShortcut.textContent = info.platform === 'darwin' ? '⌘ N' : 'Ctrl N';
   } catch (error) {

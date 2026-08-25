@@ -93,6 +93,7 @@ function userMessageMatchesParts(message, expectedParts) {
       expectedIndex++;
       continue;
     }
+    if (actual && actual.type !== 'text') continue;
     if (!actual || (!actual.synthetic && !actual.ignored)) return false;
   }
   return expectedIndex === expectedParts.length;

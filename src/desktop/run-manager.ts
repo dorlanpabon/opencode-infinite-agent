@@ -8,6 +8,7 @@ import type {
   LogLevel,
   OpenCodeSessionSummary,
   OperationReceipt,
+  RunAttachment,
   RunState,
   RunStatus,
   SseState,
@@ -109,12 +110,21 @@ function validDate(value: unknown): value is string {
   return typeof value === 'string' && Number.isFinite(Date.parse(value));
 }
 
+function isRunAttachment(value: unknown): value is RunAttachment {
+  return isRecord(value)
+    && typeof value.path === 'string' && path.isAbsolute(value.path) && value.path.length <= 32_767
+    && typeof value.name === 'string' && value.name.length > 0 && value.name.length <= 1_024
+    && typeof value.mime === 'string' && value.mime.length > 0 && value.mime.length <= 256
+    && Number.isSafeInteger(value.size) && (value.size as number) >= 0 && (value.size as number) <= 20 * 1024 * 1024;
+}
+
 function isRunState(value: unknown): value is RunState {
   if (!isRecord(value)) return false;
   return value.schemaVersion === 1
     && typeof value.runId === 'string' && RUN_ID.test(value.runId)
     && typeof value.operationId === 'string' && RUN_ID.test(value.operationId)
-    && typeof value.task === 'string' && value.task.length > 0 && value.task.length <= 8_000
+    && typeof value.task === 'string' && value.task.length > 0
+    && Array.isArray(value.attachments) && value.attachments.length <= 100 && value.attachments.every(isRunAttachment)
     && typeof value.workspace === 'string' && path.isAbsolute(value.workspace) && value.workspace.length <= 32_767
     && typeof value.name === 'string' && value.name.length > 0 && value.name.length <= 128
     && nullableString(value.sessionRef, 2_048) && nullableString(value.sessionId, 256)
@@ -303,6 +313,7 @@ export class RunManager {
       runId,
       operationId,
       task: input.task,
+      attachments: structuredClone(input.attachments),
       workspace: path.resolve(input.workspace),
       name: input.name ?? titleFromTask(input.task),
       sessionRef: input.sessionRef,
@@ -572,8 +583,9 @@ export class RunManager {
   private async readStateFile(file: string): Promise<RunState | null> {
     try {
       const info = await stat(file);
-      if (!info.isFile() || info.size > 512 * 1024) return null;
+      if (!info.isFile()) return null;
       const value: unknown = JSON.parse(await readFile(file, 'utf8'));
+      if (isRecord(value) && value.schemaVersion === 1 && value.attachments === undefined) value.attachments = [];
       return isRunState(value) ? value : null;
     } catch {
       return null;

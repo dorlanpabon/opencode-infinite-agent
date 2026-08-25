@@ -6,6 +6,7 @@ import type {
   StartRunInput,
 } from './contracts.js';
 import type { DesktopEngineAdapter, EngineRunContext, EngineRunResult } from './run-manager.js';
+import { assertAttachmentMetadata } from './attachments.js';
 import { OpenCodeSessionCatalog } from './session-catalog.js';
 
 interface AgentResult {
@@ -33,6 +34,7 @@ interface AgentModule {
       cost?: number;
       lastText?: string;
     }): void;
+    beforeFirstPrompt?(): Promise<void>;
     abortRemoteOnSignal?: boolean;
   }): Promise<AgentResult>;
 }
@@ -125,7 +127,9 @@ async function run(
     const ref = input.sessionRef;
     const result = await agentModule.executeAgent({
       dir: input.workspace,
-      prompt: input.resumeExisting ? undefined : input.task,
+      prompt: input.task,
+      attachments: input.attachments,
+      resumeExisting: input.resumeExisting,
       session: ref && ref.startsWith('ses_') ? ref : undefined,
       deeplink: ref && ref.startsWith('oc://') ? ref : undefined,
       title: input.name,
@@ -172,6 +176,7 @@ async function run(
           lastMessage: event.lastText,
         });
       },
+      beforeFirstPrompt: () => assertAttachmentMetadata(input.attachments),
       abortRemoteOnSignal: !input.resumeExisting,
     });
     void catalog.reconcile().catch(() => undefined);

@@ -23,6 +23,7 @@ import {
   type SessionConnectionInput,
   type StartRunInput,
 } from './contracts.js';
+import { assertAttachmentMetadata, inspectAttachments, parseDroppedPaths } from './attachments.js';
 import { createOpenCodeEngineAdapter } from './engine-adapter.js';
 import {
   RunManager,
@@ -35,6 +36,8 @@ const CHANNELS = {
   doctor: 'system:doctor',
   chooseWorkspace: 'workspace:choose',
   chooseBinary: 'binary:choose',
+  chooseAttachments: 'attachments:choose',
+  resolveDroppedAttachments: 'attachments:resolve-dropped',
   listRuns: 'runs:list',
   getRun: 'runs:get',
   listSessions: 'sessions:list',
@@ -141,6 +144,7 @@ async function assertStartPaths(input: StartRunInput): Promise<void> {
     assertAbsolutePath(input.binary, 'El binario OpenCode');
     if (!await isFile(input.binary)) throw new TypeError('El binario OpenCode no existe o no es un archivo.');
   }
+  await assertAttachmentMetadata(input.attachments);
 }
 
 async function assertConnectionPaths(input: SessionConnectionInput): Promise<void> {
@@ -202,6 +206,18 @@ function registerHandlers(): void {
       filters,
     });
     return result.canceled ? null : result.filePaths[0] ?? null;
+  });
+  ipcMain.handle(CHANNELS.chooseAttachments, async (event) => {
+    assertTrustedSender(event);
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      title: 'Adjuntar archivos al objetivo',
+      properties: ['openFile', 'multiSelections'],
+    });
+    return result.canceled ? [] : inspectAttachments(result.filePaths);
+  });
+  ipcMain.handle(CHANNELS.resolveDroppedAttachments, async (event, raw: unknown) => {
+    assertTrustedSender(event);
+    return inspectAttachments(parseDroppedPaths(raw));
   });
   ipcMain.handle(CHANNELS.listRuns, async (event) => {
     assertTrustedSender(event);

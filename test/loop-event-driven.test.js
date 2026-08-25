@@ -186,6 +186,68 @@ test('no envia por tiempo: continua una vez e inmediatamente tras terminal+idle'
   assert.equal(api.state.aborts, 0);
 });
 
+test('al activar una sesión ocupada espera idle, envía el objetivo y adjunta archivos solo una vez', async () => {
+  const sessionId = 'ses_activate_objective';
+  const stream = fakeEventStream();
+  const api = harness(sessionId, stream);
+  const running = assistant('msg_existing_work', sessionId, '', false, 'msg_existing_user');
+  api.state.messages = [user('msg_existing_user', sessionId, 'objetivo anterior'), running];
+  api.state.status = { [sessionId]: { type: 'busy' } };
+  const attachment = {
+    path: require('node:path').resolve('brief.md'),
+    name: 'brief.md',
+    mime: 'text/plain',
+    size: 10,
+  };
+  let attachmentValidations = 0;
+  const run = runLoop({
+    req: api.req,
+    sessionId,
+    cfg: cfg({ maxIterations: 2 }),
+    firstPrompt: 'nuevo objetivo verificable',
+    firstAttachments: [attachment],
+    resumeExisting: true,
+    replaceObjective: true,
+    beforeFirstPrompt: async () => { attachmentValidations++; },
+    flag: { aborted: false, signal: new AbortController().signal },
+    log: logger(),
+    eventStream: stream,
+  });
+
+  await delay(20);
+  assert.equal(api.state.prompts.length, 0);
+  assert.equal(attachmentValidations, 0);
+  running.info.time.completed = Date.now();
+  running.parts = [{ type: 'text', text: 'turno anterior listo' }];
+  api.state.status = {};
+  stream.emit({ type: 'message.updated', properties: { info: running.info } });
+  stream.emit({ type: 'session.idle', properties: { sessionID: sessionId } });
+  await waitFor(() => api.state.prompts.length === 1);
+  assert.equal(attachmentValidations, 1);
+  assert.equal(api.state.prompts[0], 'nuevo objetivo verificable');
+  assert.deepEqual(api.state.promptBodies[0].parts[1], {
+    type: 'file',
+    mime: 'text/plain',
+    filename: 'brief.md',
+    url: require('node:url').pathToFileURL(attachment.path).href,
+  });
+
+  const firstReply = assistant('msg_new_incomplete', sessionId, 'falta verificar', true, api.state.promptIds[0]);
+  api.state.messages.push(firstReply);
+  api.state.status = {};
+  stream.emit({ type: 'message.updated', properties: { info: firstReply.info } });
+  stream.emit({ type: 'session.idle', properties: { sessionID: sessionId } });
+  await waitFor(() => api.state.prompts.length === 2);
+  assert.equal(api.state.promptBodies[1].parts.some((part) => part.type === 'file'), false);
+
+  const finalReply = assistant('msg_new_done', sessionId, '[TASK_COMPLETE]', true, api.state.promptIds[1]);
+  api.state.messages.push(finalReply);
+  api.state.status = {};
+  stream.emit({ type: 'message.updated', properties: { info: finalReply.info } });
+  stream.emit({ type: 'session.idle', properties: { sessionID: sessionId } });
+  assert.equal((await run).status, 'complete');
+});
+
 test('no envia antes de que SSE este conectado', async () => {
   const sessionId = 'ses_connect_first';
   const stream = fakeEventStream();
