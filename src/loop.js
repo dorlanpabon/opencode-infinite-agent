@@ -13,6 +13,7 @@ const {
   TurnMonitorAborted,
   TurnCorrelationError,
   isTerminalAssistant,
+  isRealUserMessage,
 } = require('./turn-monitor');
 
 class LoopAborted extends Error {
@@ -20,6 +21,8 @@ class LoopAborted extends Error {
 }
 class LoopStalled extends Error {}
 class UnsafeSessionHistoryError extends Error {}
+
+const FIRST_PROMPT_MARKER = /^<!-- opencode-infinite-agent-turn:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12} -->$/iu;
 
 // Backoff abortable usado solo para fallos confirmados de transporte/HTTP.
 function sleepAbortable(ms, flag) {
@@ -35,8 +38,10 @@ function sleepAbortable(ms, flag) {
   });
 }
 
-function buildMessageBody(cfg, text, attachments = []) {
-  const marker = `<!-- opencode-infinite-agent-turn:${randomUUID()} -->`;
+function buildMessageBody(cfg, text, attachments = [], promptMarker = null) {
+  const marker = typeof promptMarker === 'string' && FIRST_PROMPT_MARKER.test(promptMarker)
+    ? promptMarker
+    : `<!-- opencode-infinite-agent-turn:${randomUUID()} -->`;
   const body = {
     parts: [
       { type: 'text', text },
@@ -127,6 +132,8 @@ async function exchange(req, sessionId, text, cfg, flag, monitor, log, {
   adoptRunning = false,
   attachments = [],
   beforeSend,
+  expectedPromptMarker = null,
+  promptMarker = null,
 } = {}) {
   let mayAdoptRunning = Boolean(adoptRunning);
   for (;;) {
@@ -143,6 +150,31 @@ async function exchange(req, sessionId, text, cfg, flag, monitor, log, {
 
     const baselineIds = messageIds(before.messages);
     const unresolvedParents = unresolvedTurnParentIds(before.messages);
+    if (expectedPromptMarker) {
+      const matchingUsers = before.messages.filter((message) => isRealUserMessage(message)
+        && Array.isArray(message.parts)
+        && message.parts.some((part) => part && part.type === 'text'
+          && part.synthetic === true && part.ignored === true && part.text === expectedPromptMarker));
+      if (matchingUsers.length > 1) {
+        throw new TurnCorrelationError('La marca durable del primer prompt aparece en múltiples mensajes user');
+      }
+      if (matchingUsers.length === 1) {
+        const expectedParentId = matchingUsers[0].info.id;
+        const terminal = [...before.messages].reverse()
+          .find((message) => isTerminalAssistant(message) && message.info.parentID === expectedParentId);
+        if (terminal) return terminal;
+        const ticket = monitor.waitForTerminal({
+          knownMessageIds: terminalMessageIds(before.messages),
+          expectedParentId,
+          timeoutMs: cfg.stallTimeoutMs,
+          hardTimeoutMs: cfg.turnHardTimeoutMs,
+          signal: flag.signal,
+        });
+        log.info(`Primer prompt durable ${expectedParentId} confirmado; esperando su respuesta terminal`);
+        void ticket.reconcile().catch((error) => log.debug(`Reconciliacion: ${safeText(error)}`));
+        return await awaitTicket(ticket, flag);
+      }
+    }
     // turnos zombi: sin respuesta terminal y con horas de antiguedad son
     // restos de corridas muertas (stalls/abortos); se excluyen del conteo
     // para que la guarda no bloquee sesiones con historial contaminado
@@ -207,7 +239,7 @@ async function exchange(req, sessionId, text, cfg, flag, monitor, log, {
     }
 
     if (beforeSend) await beforeSend();
-    const body = buildMessageBody(cfg, text, attachments);
+    const body = buildMessageBody(cfg, text, attachments, promptMarker);
     const ticket = monitor.waitForTerminal({
       knownMessageIds: baselineIds,
       expectedUserParts: body.parts.filter((part) => part.type === 'text'),
@@ -273,6 +305,8 @@ async function runLoop({
   onState,
   resumeExisting = false,
   replaceObjective = false,
+  recoverPromptMarker = null,
+  firstPromptMarker = null,
   beforeFirstPrompt,
 }) {
   const state = {
@@ -297,7 +331,7 @@ async function runLoop({
   log.banner(`LOOP INFINITO INICIADO | sesion ${sessionId} | max ${cfg.maxIterations} iteraciones`);
 
   try {
-    if (resumeExisting && !replaceObjective) {
+    if (resumeExisting && !replaceObjective && !recoverPromptMarker) {
       const existing = await existingCompletion(req, sessionId, cfg, monitor, log);
       if (existing) {
         state.lastText = safeText(existing.text, 16_000);
@@ -318,9 +352,11 @@ async function runLoop({
         attempt++;
         try {
           reply = await exchange(req, sessionId, prompt, cfg, flag, monitor, log, {
-            adoptRunning: resumeExisting && !replaceObjective && i === 1,
+            adoptRunning: resumeExisting && !replaceObjective && !recoverPromptMarker && i === 1,
             attachments: i === 1 ? firstAttachments : [],
             beforeSend: i === 1 ? beforeFirstPrompt : undefined,
+            expectedPromptMarker: i === 1 ? recoverPromptMarker : null,
+            promptMarker: i === 1 ? firstPromptMarker : null,
           });
         } catch (e) {
           if (e instanceof LoopAborted || flag.aborted) throw new LoopAborted();

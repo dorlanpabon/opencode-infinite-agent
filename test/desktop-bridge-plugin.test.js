@@ -70,7 +70,17 @@ test('plugin Desktop expone solo la API autenticada necesaria del SDK propietari
         }
         return ok({ id: options.path.id, directory: workspace });
       },
-      messages: async (options) => { calls.push(['messages', options]); return ok([]); },
+      messages: async (options) => {
+        calls.push(['messages', options]);
+        return ok([
+          ...Array.from({ length: 7 }, (_, index) => ({
+            info: { role: index % 2 === 0 ? 'user' : 'assistant' },
+            parts: [{ type: 'text', text: String(index).repeat(5_000) }],
+          })),
+          { info: { role: 'assistant' }, parts: [{ type: 'text', text: 'hidden', synthetic: true }] },
+          { info: { role: 'tool' }, parts: [{ type: 'text', text: 'tool-secret' }] },
+        ]);
+      },
       todo: async (options) => { calls.push(['todo', options]); return ok([{ id: 'todo_real1', status: 'completed' }]); },
       promptAsync: async (options) => { calls.push(['promptAsync', options]); return { data: {}, response: { status: 204 } }; },
       abort: async (options) => { calls.push(['abort', options]); return ok(true); },
@@ -127,6 +137,15 @@ test('plugin Desktop expone solo la API autenticada necesaria del SDK propietari
   assert.equal(calls.find(([name]) => name === 'promptAsync')[1].body.parts[0].text.length, objective.length);
   const todos = await fetch(`${descriptor.endpoint}/session/ses_real1/todo`, { headers });
   assert.deepEqual(await todos.json(), [{ id: 'todo_real1', status: 'completed' }]);
+  const context = await fetch(`${descriptor.endpoint}/session/ses_real1/message?limit=20`, { headers });
+  const contextBody = await context.json();
+  assert.equal(contextBody.length, 6);
+  assert.equal(contextBody.every((message) => ['user', 'assistant'].includes(message.role) && message.text.length === 4_000), true);
+  assert.equal(JSON.stringify(contextBody).includes('hidden'), false);
+  assert.equal(JSON.stringify(contextBody).includes('tool-secret'), false);
+  assert.equal(contextBody.reduce((total, message) => total + message.text.length, 0), 24_000);
+  assert.equal(calls.findLast(([name]) => name === 'messages')[1].query.limit, 20);
+  assert.equal((await fetch(`${descriptor.endpoint}/session/ses_real1/message?limit=21`, { headers })).status, 400);
   const invalid = await fetch(`${descriptor.endpoint}/session/ses_configinvalid`, { headers });
   assert.equal(invalid.status, 400);
   const invalidBody = await invalid.json();

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, readdir, rename, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import type {
+  ConnectionMode,
   DesktopEvent,
   DoctorInput,
   DoctorResult,
@@ -9,9 +10,12 @@ import type {
   OpenCodeModelCatalog,
   OpenCodeSessionSummary,
   OperationReceipt,
+  ResumeRunInput,
   RunAttachment,
   RunState,
   RunStatus,
+  SessionContext,
+  SessionContextInput,
   SseState,
   SessionConnectionInput,
   SetContinuousInput,
@@ -25,6 +29,7 @@ const { safeText } = require('../safe-text.js') as {
 export { safeText };
 
 const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const FIRST_PROMPT_MARKER = /^<!-- opencode-infinite-agent-turn:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12} -->$/iu;
 const ACTIVE_STATUSES = new Set<RunStatus>([
   'initializing', 'connecting', 'working', 'retrying', 'settling', 'continuing', 'stopping',
 ]);
@@ -32,6 +37,7 @@ const RUN_STATUSES = new Set<RunStatus>([
   ...ACTIVE_STATUSES, 'completed', 'blocked', 'stopped', 'failed',
 ]);
 const SSE_STATES = new Set<SseState>(['disconnected', 'connecting', 'connected', 'reconnecting', 'closed']);
+const PAUSED_CURRENT_TURN_REASON = 'Modo continuo desactivado; el turno actual continúa en OpenCode.';
 
 export class DesktopRunError extends Error {
   constructor(readonly code: string, message: string) {
@@ -62,6 +68,13 @@ export interface EngineRunContext {
   emit(event: EngineEvent): Promise<void>;
 }
 
+export interface EngineStartInput extends StartRunInput {
+  connectionMode: ConnectionMode;
+  recoveryMode: 'new-objective' | 'recover-first-prompt' | 'continue';
+  firstPromptMarker: string | null;
+  firstPromptKind: 'objective' | 'continuation' | null;
+}
+
 export interface EngineRunResult {
   status: 'completed' | 'blocked' | 'stopped';
   reason: string;
@@ -82,12 +95,13 @@ export interface EngineRunResult {
  */
 export interface DesktopEngineAdapter {
   doctor(input: DoctorInput): Promise<DoctorResult>;
-  run(input: StartRunInput, context: EngineRunContext): Promise<EngineRunResult>;
+  run(input: EngineStartInput, context: EngineRunContext): Promise<EngineRunResult>;
   listSessions?(
     input: SessionConnectionInput,
     listener: (sessions: OpenCodeSessionSummary[]) => void,
   ): Promise<OpenCodeSessionSummary[]>;
   listModels?(input: SessionConnectionInput): Promise<OpenCodeModelCatalog>;
+  getSessionContext?(input: SessionContextInput): Promise<SessionContext>;
   stop?(runId: string, sessionId: string | null): Promise<void>;
   shutdown?(): Promise<void>;
 }
@@ -128,8 +142,13 @@ function isRunAttachment(value: unknown): value is RunAttachment {
 
 function isRunState(value: unknown): value is RunState {
   if (!isRecord(value)) return false;
-  return value.schemaVersion === 1
+  return value.schemaVersion === 3
     && typeof value.runId === 'string' && RUN_ID.test(value.runId)
+    && (value.sourceRunId === null || (typeof value.sourceRunId === 'string' && RUN_ID.test(value.sourceRunId)))
+    && (value.firstPromptMarker === null
+      || (typeof value.firstPromptMarker === 'string' && FIRST_PROMPT_MARKER.test(value.firstPromptMarker)))
+    && (value.firstPromptKind === null || value.firstPromptKind === 'objective' || value.firstPromptKind === 'continuation')
+    && ((value.firstPromptMarker === null) === (value.firstPromptKind === null))
     && typeof value.operationId === 'string' && RUN_ID.test(value.operationId)
     && typeof value.task === 'string' && value.task.length > 0
     && Array.isArray(value.attachments) && value.attachments.length <= 100 && value.attachments.every(isRunAttachment)
@@ -138,6 +157,7 @@ function isRunState(value: unknown): value is RunState {
     && nullableString(value.sessionRef, 2_048) && nullableString(value.sessionId, 256)
     && nullableString(value.model, 512) && nullableString(value.agent, 256)
     && nullableString(value.binary, 32_767) && nullableString(value.attach, 2_048)
+    && (value.connectionMode === 'desktop-sidecar' || value.connectionMode === 'dedicated' || value.connectionMode === 'attach')
     && typeof value.status === 'string' && RUN_STATUSES.has(value.status as RunStatus)
     && nullableString(value.reason, 4_000)
     && Number.isSafeInteger(value.iteration) && (value.iteration as number) >= 0
@@ -151,6 +171,39 @@ function isRunState(value: unknown): value is RunState {
     && validDate(value.createdAt) && validDate(value.updatedAt)
     && (value.completedAt === null || validDate(value.completedAt))
     && nullableString(value.lastError, 4_000);
+}
+
+function connectionModeFor(input: StartRunInput): ConnectionMode {
+  if (input.attach !== null) return 'attach';
+  return input.resumeExisting ? 'desktop-sidecar' : 'dedicated';
+}
+
+function migrateRunState(value: unknown): RunState | null {
+  if (!isRecord(value)) return null;
+  if (value.attachments === undefined) value.attachments = [];
+  if (value.schemaVersion === 1) {
+    value.schemaVersion = 2;
+    value.sourceRunId = null;
+    value.connectionMode = value.attach !== null
+      ? 'attach'
+      : typeof value.sessionRef === 'string'
+        && value.sessionRef.startsWith('ses_')
+        ? 'desktop-sidecar'
+        : 'dedicated';
+  }
+  if (value.schemaVersion === 2) {
+    value.schemaVersion = 3;
+    value.firstPromptMarker = null;
+    value.firstPromptKind = null;
+  } else if (value.schemaVersion === 3 && value.firstPromptKind === undefined) {
+    value.firstPromptMarker = null;
+    value.firstPromptKind = null;
+  }
+  return isRunState(value) ? value : null;
+}
+
+function createFirstPromptMarker(): string {
+  return `<!-- opencode-infinite-agent-turn:${randomUUID()} -->`;
 }
 
 function operationError(error: unknown): { code: string; message: string } {
@@ -301,12 +354,99 @@ export class RunManager {
     return this.adapter.listModels(input);
   }
 
+  async getSessionContext(input: SessionContextInput): Promise<SessionContext> {
+    if (!this.adapter?.getSessionContext) {
+      throw new DesktopRunError('CONTEXT_UNAVAILABLE', 'El motor OpenCode no expone contexto de sesiones.');
+    }
+    const activeState = [...this.active.keys()].map((runId) => this.states.get(runId)).find(Boolean);
+    if (activeState && (sessionConnectionKey(input) !== sessionConnectionKey(activeState)
+      || input.connectionMode !== activeState.connectionMode)) {
+      throw new DesktopRunError('ENGINE_BUSY', 'No se puede cambiar el servidor de contexto mientras existe una ejecución activa.');
+    }
+    return this.adapter.getSessionContext(input);
+  }
+
   async setContinuous(input: SetContinuousInput): Promise<OperationReceipt> {
     if (input.enabled) return this.start(input.run);
     return this.pauseSession(input.sessionId);
   }
 
   async start(input: StartRunInput): Promise<OperationReceipt> {
+    return this.startSuccessor(
+      input,
+      null,
+      connectionModeFor(input),
+      'new-objective',
+      createFirstPromptMarker(),
+      'objective',
+    );
+  }
+
+  async resume(input: ResumeRunInput): Promise<OperationReceipt> {
+    if (input.confirmed !== true) throw new DesktopRunError('RESUME_NOT_CONFIRMED', 'La reanudación requiere confirmación explícita.');
+    const source = this.states.get(input.runId);
+    if (!source) throw new DesktopRunError('RUN_NOT_FOUND', 'La ejecución solicitada no existe.');
+    if (source.status !== 'stopped' && source.status !== 'failed' && source.status !== 'blocked') {
+      throw new DesktopRunError('RUN_NOT_RESUMABLE', 'Solo se pueden reanudar ejecuciones detenidas, fallidas o bloqueadas.');
+    }
+    const referencedSession = source.sessionRef && /^ses_[A-Za-z0-9]+$/u.test(source.sessionRef)
+      ? source.sessionRef
+      : source.sessionRef?.match(/^oc:\/\/renderer\/server\/c2lkZWNhcg\/session\/(ses_[A-Za-z0-9]+)$/u)?.[1] ?? null;
+    const exactSession = source.sessionId && /^ses_[A-Za-z0-9]+$/u.test(source.sessionId)
+      ? source.sessionId
+      : referencedSession;
+    const next: StartRunInput = {
+      task: source.task,
+      attachments: structuredClone(source.attachments),
+      workspace: source.workspace,
+      name: source.name,
+      sessionRef: exactSession,
+      model: source.model,
+      agent: source.agent,
+      binary: source.binary,
+      attach: source.attach,
+      maxIterations: source.maxIterations,
+      maxHours: source.maxHours,
+      stallMinutes: source.stallMinutes,
+      sentinel: source.sentinel,
+      todoDetection: source.todoDetection,
+      autoApprove: false,
+      autoApproveConfirmation: false,
+      resumeExisting: exactSession !== null,
+    };
+    const connectionMode = exactSession === null && source.connectionMode === 'desktop-sidecar'
+      ? 'dedicated'
+      : source.connectionMode;
+    const recoverDurablePrompt = exactSession !== null
+      && source.iteration === 0
+      && source.firstPromptMarker !== null
+      && source.firstPromptKind !== null;
+    const recoveryMode = exactSession === null
+      ? 'new-objective'
+      : recoverDurablePrompt
+        ? 'recover-first-prompt'
+        : 'continue';
+    const firstPromptMarker = recoverDurablePrompt ? source.firstPromptMarker : createFirstPromptMarker();
+    const firstPromptKind = recoverDurablePrompt ? source.firstPromptKind
+      : exactSession === null ? 'objective' : 'continuation';
+    return this.startSuccessor(
+      next,
+      source.runId,
+      connectionMode,
+      recoveryMode,
+      firstPromptMarker,
+      firstPromptKind,
+    );
+  }
+
+  private async startSuccessor(
+    input: StartRunInput,
+    sourceRunId: string | null,
+    connectionMode: ConnectionMode,
+    recoveryMode: EngineStartInput['recoveryMode'],
+    firstPromptMarker: string | null,
+    firstPromptKind: EngineStartInput['firstPromptKind'],
+  ): Promise<OperationReceipt> {
     const adapter = this.adapter;
     if (!adapter) throw new DesktopRunError('ENGINE_UNAVAILABLE', 'El motor OpenCode Desktop no está integrado en esta compilación.');
 
@@ -324,8 +464,11 @@ export class RunManager {
     const runId = randomUUID();
     const now = new Date().toISOString();
     const state: RunState = {
-      schemaVersion: 1,
+      schemaVersion: 3,
       runId,
+      sourceRunId,
+      firstPromptMarker,
+      firstPromptKind,
       operationId,
       task: input.task,
       attachments: structuredClone(input.attachments),
@@ -337,6 +480,7 @@ export class RunManager {
       agent: input.agent,
       binary: input.binary,
       attach: input.attach,
+      connectionMode,
       status: 'initializing',
       reason: null,
       iteration: 0,
@@ -376,7 +520,13 @@ export class RunManager {
       throw error;
     }
     this.publishState(state);
-    active.promise = this.execute(adapter, input, state, controller.signal)
+    active.promise = this.execute(adapter, {
+      ...input,
+      connectionMode,
+      recoveryMode,
+      firstPromptMarker,
+      firstPromptKind,
+    }, state, controller.signal)
       .finally(() => {
         this.active.delete(runId);
         if (sessionLease) this.sessionLeases.delete(sessionLease);
@@ -415,8 +565,7 @@ export class RunManager {
     if (!state) throw new DesktopRunError('SESSION_NOT_MANAGED', 'La sesión no tiene el modo continuo activo.');
     const active = this.active.get(state.runId);
     if (!active) throw new DesktopRunError('RUN_NOT_ACTIVE', 'La supervisión no está activa en esta instancia.');
-    const reason = 'Modo continuo desactivado; el turno actual continúa en OpenCode.';
-    active.controller.abort(new DesktopRunError('RUN_PAUSED', reason));
+    active.controller.abort(new DesktopRunError('RUN_PAUSED', PAUSED_CURRENT_TURN_REASON));
     await active.promise;
     return { operationId: active.operationId, runId: active.runId };
   }
@@ -434,7 +583,7 @@ export class RunManager {
 
   private async execute(
     adapter: DesktopEngineAdapter,
-    input: StartRunInput,
+    input: EngineStartInput,
     state: RunState,
     signal: AbortSignal,
   ): Promise<void> {
@@ -600,8 +749,10 @@ export class RunManager {
       const info = await stat(file);
       if (!info.isFile()) return null;
       const value: unknown = JSON.parse(await readFile(file, 'utf8'));
-      if (isRecord(value) && value.schemaVersion === 1 && value.attachments === undefined) value.attachments = [];
-      return isRunState(value) ? value : null;
+      const legacy = isRecord(value) && (value.schemaVersion !== 3 || value.firstPromptKind === undefined);
+      const state = migrateRunState(value);
+      if (legacy && state) await this.writeState(state).catch(() => undefined);
+      return state;
     } catch {
       return null;
     }

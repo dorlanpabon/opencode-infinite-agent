@@ -102,7 +102,113 @@ test('RunManager migra historial schema 1 sin adjuntos', async (t) => {
   }));
   const manager = new RunManager(() => undefined, root, null);
   await manager.initialize();
-  assert.deepEqual((await manager.listRuns())[0].attachments, []);
+  const migrated = (await manager.listRuns())[0];
+  assert.deepEqual(migrated.attachments, []);
+  assert.equal(migrated.schemaVersion, 3);
+  assert.equal(migrated.sourceRunId, null);
+  assert.equal(migrated.firstPromptMarker, null);
+  assert.equal(migrated.firstPromptKind, null);
+  assert.equal(migrated.connectionMode, 'dedicated');
+  assert.equal(JSON.parse(await readFile(path.join(runsDirectory, `${runId}.json`), 'utf8')).schemaVersion, 3);
+});
+
+test('RunManager reanuda terminal como sucesora y conserva sesión exacta y modo de conexión', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'opencode-infinite-resume-'));
+  const workspace = path.join(root, 'workspace');
+  await mkdir(workspace);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const received = [];
+  const completions = [];
+  let resolveFirst;
+  let resolveSecond;
+  const firstDone = new Promise((resolve) => { resolveFirst = resolve; });
+  const secondDone = new Promise((resolve) => { resolveSecond = resolve; });
+  const adapter = {
+    doctor: async () => ({ ok: true, engineAvailable: true, workspaceReady: true, binaryReady: null,
+      attachReady: null, mode: 'dedicated', serverVersion: null, endpoint: null, warnings: [] }),
+    run: async (runInput, context) => {
+      received.push(runInput);
+      await context.emit({ type: 'session', sessionId: 'ses_resumeExact1' });
+      return received.length === 1
+        ? { status: 'blocked', reason: 'Proveedor limitado', sessionId: 'ses_resumeExact1' }
+        : { status: 'completed', reason: 'Listo', sessionId: 'ses_resumeExact1' };
+    },
+  };
+  const manager = new RunManager((event) => {
+    if (event.type !== 'operation-finished') return;
+    completions.push(event.run);
+    (completions.length === 1 ? resolveFirst : resolveSecond)(event.run);
+  }, root, adapter);
+  await manager.initialize();
+  const sourceReceipt = await manager.start({ ...input(workspace), autoApprove: true, autoApproveConfirmation: true });
+  const source = await firstDone;
+  assert.equal(source.status, 'blocked');
+  await assert.rejects(manager.resume({ runId: source.runId, confirmed: false }), /confirmación/iu);
+  const successorReceipt = await manager.resume({ runId: source.runId, confirmed: true });
+  const successor = await secondDone;
+  assert.equal(successor.runId, successorReceipt.runId);
+  assert.notEqual(successor.runId, sourceReceipt.runId);
+  assert.equal(successor.sourceRunId, source.runId);
+  assert.equal(successor.connectionMode, 'dedicated');
+  assert.equal(received[1].connectionMode, 'dedicated');
+  assert.equal(received[1].sessionRef, 'ses_resumeExact1');
+  assert.equal(received[1].resumeExisting, true);
+  assert.equal(received[1].recoveryMode, 'recover-first-prompt');
+  assert.equal(received[1].firstPromptMarker, source.firstPromptMarker);
+  assert.equal(received[1].firstPromptKind, 'objective');
+  assert.equal(received[1].autoApprove, false);
+  await assert.rejects(manager.resume({ runId: successor.runId, confirmed: true }), (error) => error?.code === 'RUN_NOT_RESUMABLE');
+});
+
+test('RunManager recupera una continuación ambigua por su propia marca durable', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'opencode-infinite-resume-continuation-'));
+  const workspace = path.join(root, 'workspace');
+  await mkdir(workspace);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const received = [];
+  const completed = [];
+  const waiters = [];
+  const nextCompletion = () => completed.length > 0
+    ? Promise.resolve(completed.shift())
+    : new Promise((resolve) => waiters.push(resolve));
+  const adapter = {
+    doctor: async () => ({ ok: true, engineAvailable: true, workspaceReady: true, binaryReady: null,
+      attachReady: null, mode: 'dedicated', serverVersion: null, endpoint: null, warnings: [] }),
+    run: async (runInput, context) => {
+      received.push(runInput);
+      await context.emit({ type: 'session', sessionId: 'ses_continueRecovery1' });
+      if (received.length === 1) {
+        return { status: 'blocked', reason: 'pendiente', sessionId: 'ses_continueRecovery1', iteration: 1 };
+      }
+      if (received.length === 2) throw new Error('resultado ambiguo de continuación');
+      return { status: 'completed', reason: 'done', sessionId: 'ses_continueRecovery1', iteration: 1 };
+    },
+  };
+  const manager = new RunManager((event) => {
+    if (event.type !== 'operation-finished') return;
+    const waiter = waiters.shift();
+    if (waiter) waiter(event.run);
+    else completed.push(event.run);
+  }, root, adapter);
+  await manager.initialize();
+
+  await manager.start(input(workspace));
+  const first = await nextCompletion();
+  await new Promise((resolve) => setImmediate(resolve));
+  await manager.resume({ runId: first.runId, confirmed: true });
+  const failedContinuation = await nextCompletion();
+  assert.equal(failedContinuation.status, 'failed');
+  assert.equal(failedContinuation.iteration, 0);
+  assert.equal(received[1].recoveryMode, 'continue');
+  assert.equal(received[1].firstPromptKind, 'continuation');
+  assert.notEqual(received[1].firstPromptMarker, received[0].firstPromptMarker);
+
+  await new Promise((resolve) => setImmediate(resolve));
+  await manager.resume({ runId: failedContinuation.runId, confirmed: true });
+  await nextCompletion();
+  assert.equal(received[2].recoveryMode, 'recover-first-prompt');
+  assert.equal(received[2].firstPromptKind, 'continuation');
+  assert.equal(received[2].firstPromptMarker, received[1].firstPromptMarker);
 });
 
 test('RunManager expone el catálogo de modelos del servidor vivo sin persistirlo', async (t) => {
@@ -198,6 +304,7 @@ test('modo continuo reserva la sesión y al apagar solo hace detach local', asyn
   t.after(() => rm(root, { recursive: true, force: true }));
   let adapterStops = 0;
   let abortReason = null;
+  let runCalls = 0;
   const events = [];
   const adapter = {
     doctor: async () => ({ ok: true, engineAvailable: true, workspaceReady: true, binaryReady: null,
@@ -211,9 +318,14 @@ test('modo continuo reserva la sesión y al apagar solo hace detach local', asyn
       return sessions;
     },
     run: async (runInput, context) => {
+      runCalls += 1;
       assert.equal(runInput.resumeExisting, true);
       assert.equal(runInput.sessionRef, 'ses_resume123');
+      assert.equal(runInput.recoveryMode, runCalls === 2 ? 'recover-first-prompt' : 'new-objective');
       await context.emit({ type: 'session', sessionId: 'ses_resume123' });
+      if (runCalls === 2) {
+        return { status: 'completed', reason: 'Turno adoptado sin repetir el objetivo.', sessionId: 'ses_resume123' };
+      }
       return new Promise((resolve) => {
         const detached = () => {
           abortReason = context.signal.reason;
@@ -226,10 +338,15 @@ test('modo continuo reserva la sesión y al apagar solo hace detach local', asyn
     stop: async () => { adapterStops++; },
   };
   let finished;
+  let resumed;
   const done = new Promise((resolve) => { finished = resolve; });
+  const resumedDone = new Promise((resolve) => { resumed = resolve; });
   const manager = new RunManager((event) => {
     events.push(event);
-    if (event.type === 'operation-finished') finished(event.run);
+    if (event.type === 'operation-finished') {
+      if (event.run.sourceRunId) resumed(event.run);
+      else finished(event.run);
+    }
   }, root, adapter);
   await manager.initialize();
   await manager.listSessions({ workspace, binary: null, attach: null });
@@ -247,6 +364,11 @@ test('modo continuo reserva la sesión y al apagar solo hace detach local', asyn
   assert.equal(abortReason?.code, 'RUN_PAUSED');
   assert.ok(events.some((event) => event.type === 'sessions-snapshot'
     && event.sessions.some((session) => session.id === 'ses_resume123' && session.continuous)));
+  await manager.resume({ runId: final.runId, confirmed: true });
+  const successor = await resumedDone;
+  assert.equal(successor.status, 'completed');
+  assert.equal(successor.sourceRunId, final.runId);
+  assert.equal(runCalls, 2);
   await manager.shutdown();
 });
 
@@ -262,6 +384,7 @@ test('catálogo no cambia de servidor mientras el run global está activo', asyn
     doctor: async () => ({ ok: true, engineAvailable: true, workspaceReady: true, binaryReady: null,
       attachReady: null, mode: 'dedicated', serverVersion: null, endpoint: null, warnings: [] }),
     listSessions: async () => { catalogCalls++; return []; },
+    getSessionContext: async (value) => ({ sessionId: value.sessionId, messages: [] }),
     run: async (_runInput, context) => new Promise((resolve) => {
       const stopped = () => resolve({ status: 'stopped', reason: 'stopped' });
       if (context.signal.aborted) stopped();
@@ -272,6 +395,15 @@ test('catálogo no cambia de servidor mientras el run global está activo', asyn
   await manager.initialize();
   await manager.listSessions({ workspace, binary: null, attach: null });
   await manager.start(input(workspace));
+  assert.deepEqual(await manager.getSessionContext({
+    workspace, binary: null, attach: null, sessionRef: null, connectionMode: 'dedicated', sessionId: 'ses_context1', limit: 20,
+  }), { sessionId: 'ses_context1', messages: [] });
+  await assert.rejects(
+    manager.getSessionContext({
+      workspace, binary: null, attach: null, sessionRef: 'ses_context1', connectionMode: 'desktop-sidecar', sessionId: 'ses_context1', limit: 20,
+    }),
+    (error) => error && error.code === 'ENGINE_BUSY',
+  );
   await manager.listSessions({ workspace, binary: null, attach: null });
   await assert.rejects(
     manager.listSessions({ workspace: other, binary: null, attach: null }),

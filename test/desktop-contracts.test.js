@@ -2,8 +2,13 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const {
   parseDoctorInput,
+  buildRunDeepLink,
+  buildSessionDeepLink,
   parseCopySessionLinkInput,
   parseOpenProjectInput,
+  parseDeepLink,
+  parseResumeRunInput,
+  parseSessionContextInput,
   parseSessionConnectionInput,
   parseSetContinuousInput,
   parseStartRunInput,
@@ -101,4 +106,43 @@ test('contratos Desktop rechazan campos extra, attach remoto y auto-approve sin 
   assert.throws(() => parseStartRunInput({ ...valid, attach: 'https://example.com' }), /loopback/iu);
   assert.throws(() => parseStartRunInput({ ...valid, autoApprove: true }), /confirma/iu);
   assert.throws(() => parseStartRunInput({ ...valid, attachments: [{ path: 'brief.pdf' }] }), /adjuntos/iu);
+});
+
+test('deeplinks Infinite son estrictos, totales y no codifican acciones', () => {
+  const runId = '123e4567-e89b-42d3-a456-426614174000';
+  assert.equal(buildRunDeepLink(runId), `opencode-infinite://run/${runId}`);
+  assert.equal(buildSessionDeepLink('ses_exact123'), 'opencode-infinite://session/ses_exact123');
+  assert.deepEqual(parseDeepLink(`opencode-infinite://run/${runId}`), { kind: 'run', id: runId });
+  assert.deepEqual(parseDeepLink('opencode-infinite://session/ses_exact123'), { kind: 'session', id: 'ses_exact123' });
+  for (const invalid of [
+    `opencode-infinite://run/${runId}?resume=true`,
+    `opencode-infinite://run/${runId}/resume`,
+    'opencode-infinite://session/ses_exact123#start',
+    'opencode-infinite://session/%73es_exact123',
+    'opencode-infinite://session/%E0%A4%A',
+    'https://run/123e4567-e89b-42d3-a456-426614174000',
+  ]) assert.equal(parseDeepLink(invalid), null, invalid);
+  assert.equal(parseDeepLink({ url: 'opencode-infinite://session/ses_exact123' }), null);
+});
+
+test('reanudar exige confirmación y contexto limita conexión, sesión y cantidad', () => {
+  const runId = '123e4567-e89b-42d3-a456-426614174000';
+  assert.deepEqual(parseResumeRunInput({ runId, confirmed: true }), { runId, confirmed: true });
+  assert.throws(() => parseResumeRunInput({ runId, confirmed: false }), /confirmación/iu);
+  const context = {
+    workspace: 'C:\\workspace', binary: null, attach: null, sessionRef: 'ses_exact123',
+    connectionMode: 'desktop-sidecar', sessionId: 'ses_exact123', limit: 20,
+  };
+  assert.deepEqual(parseSessionContextInput(context), context);
+  const internalContext = {
+    ...context,
+    sessionRef: 'oc://renderer/server/c2lkZWNhcg/session/ses_exact123',
+    connectionMode: 'dedicated',
+  };
+  assert.deepEqual(parseSessionContextInput(internalContext), internalContext);
+  assert.throws(() => parseSessionContextInput({ ...context, limit: 21 }), /contexto/iu);
+  assert.throws(() => parseSessionContextInput({ ...context, connectionMode: 'remote' }), /contexto/iu);
+  assert.throws(() => parseSessionContextInput({ ...context, connectionMode: 'attach' }), /contexto/iu);
+  assert.throws(() => parseSessionContextInput({ ...context, sessionRef: 'ses_other123' }), /contexto/iu);
+  assert.throws(() => parseSessionContextInput({ ...internalContext, sessionId: 'ses_other123' }), /contexto/iu);
 });

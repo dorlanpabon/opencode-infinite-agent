@@ -6,9 +6,11 @@ import type {
   OpenCodeModelCatalog,
   OpenCodeSessionStatus,
   OpenCodeSessionSummary,
+  SessionContext,
   SessionConnectionInput,
 } from './contracts.js';
 import { parseOpenCodeModelCatalog } from './model-catalog.js';
+import { parseSessionContextPayload } from './session-context.js';
 
 const { parseSessionRef } = require('../session-ref.js') as {
   parseSessionRef(input: unknown): string | null;
@@ -66,7 +68,7 @@ const serverModule = require('../server.js') as ServerModule;
 const SESSION_ID = /^ses_[A-Za-z0-9]+$/u;
 const PLUGIN_MARKER = Buffer.from('// opencode-infinite-agent:desktop-bridge\n');
 const LEGACY_PLUGIN_HASHES = new Set(['fd43559cf1f06118dd3300c2dfeb20b85ea24fcf14ec1261b54350f8b4197d3f']);
-const REQUIRED_BRIDGE_VERSION = 4;
+const REQUIRED_BRIDGE_VERSION = 5;
 const BRIDGE_FAILURE_LIMIT = 3;
 const RECONCILE_EVENTS = new Set([
   'server.connected',
@@ -503,6 +505,18 @@ export class OpenCodeDesktopBridgeCatalog {
       { directory: requestedWorkspace, timeoutMs: 15_000 },
     );
     return parseOpenCodeModelCatalog(value);
+  }
+
+  async context(sessionId: string, workspace: string, limit: number): Promise<SessionContext> {
+    const descriptor = this.endpointForSession(sessionId);
+    const value = await this.dependencies.server.request(
+      descriptor.endpoint,
+      'GET',
+      `/session/${sessionId}/message?limit=${limit}`,
+      null,
+      { directory: path.resolve(workspace), timeoutMs: 10_000, maxResponseBytes: 128 * 1024 },
+    );
+    return parseSessionContextPayload(sessionId, value, limit);
   }
 
   async reconcile(): Promise<OpenCodeSessionSummary[]> {

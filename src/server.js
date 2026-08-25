@@ -85,12 +85,52 @@ function scopedRequest(base, method, pathName, directory) {
   return { url: url.toString(), headers };
 }
 
+async function boundedResponseText(response, maximumBytes) {
+  if (maximumBytes === null) return response.text();
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > maximumBytes) {
+    if (response.body) await response.body.cancel().catch(() => {});
+    throw new Error(`La respuesta HTTP excede el límite de ${maximumBytes} bytes`);
+  }
+  if (!response.body || typeof response.body.getReader !== 'function') {
+    const text = await response.text();
+    if (Buffer.byteLength(text, 'utf8') > maximumBytes) {
+      throw new Error(`La respuesta HTTP excede el límite de ${maximumBytes} bytes`);
+    }
+    return text;
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const chunks = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maximumBytes) {
+        await reader.cancel().catch(() => {});
+        throw new Error(`La respuesta HTTP excede el límite de ${maximumBytes} bytes`);
+      }
+      chunks.push(decoder.decode(value, { stream: true }));
+    }
+    chunks.push(decoder.decode());
+    return chunks.join('');
+  } finally {
+    try { reader.releaseLock(); } catch {}
+  }
+}
+
 async function request(base, method, pathName, body, {
   timeoutMs = 30000,
   directory = null,
   signal = null,
   fetchImpl = fetch,
+  maxResponseBytes = null,
 } = {}) {
+  if (maxResponseBytes !== null && (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes < 1)) {
+    throw new TypeError('maxResponseBytes debe ser un entero positivo');
+  }
   const scoped = scopedRequest(base, method, pathName, directory);
   const ctl = new AbortController();
   let timedOut = false;
@@ -110,7 +150,7 @@ async function request(base, method, pathName, body, {
       body: body != null ? JSON.stringify(body) : undefined,
       signal: ctl.signal,
     });
-    const text = await res.text();
+    const text = await boundedResponseText(res, maxResponseBytes);
     let data = null;
     if (text) {
       try { data = JSON.parse(text); } catch { data = text; }

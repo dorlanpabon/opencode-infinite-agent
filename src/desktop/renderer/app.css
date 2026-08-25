@@ -228,6 +228,11 @@ button:disabled {
   outline-offset: 1px;
 }
 
+.session-item[data-selected="true"] {
+  border-color: var(--amber);
+  background: var(--amber-soft);
+}
+
 .session-item[data-status="busy"],
 .session-item[data-status="retry"] {
   border-color: rgb(230 166 66 / 12%);
@@ -749,6 +754,13 @@ button:disabled {
   min-width: 0;
 }
 
+.run-header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .heading-meta {
   display: flex;
   align-items: center;
@@ -1175,6 +1187,47 @@ progress::-webkit-progress-value {
   min-height: 34px;
   padding-inline: 10px;
   font-size: 10px;
+}
+
+.context-status {
+  margin: 0 0 10px;
+  color: var(--faint);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.context-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.context-message {
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgb(255 255 255 / 2%);
+}
+
+.context-message[data-role="assistant"] {
+  border-left-color: var(--amber);
+}
+
+.context-message strong {
+  color: var(--amber);
+  font-size: 8px;
+  text-transform: uppercase;
+}
+
+.context-message p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .inspector-list div {
@@ -1845,6 +1898,10 @@ progress::-webkit-progress-value {
 
   .run-header .button {
     margin-top: 16px;
+  }
+
+  .run-header-actions {
+    justify-content: flex-start;
   }
 
   .metrics {

@@ -1,6 +1,7 @@
 import type {
   DesktopApi,
   DesktopEvent,
+  DeepLinkTarget,
   DoctorResult,
   LogLevel,
   OpenCodeModelCatalog,
@@ -8,6 +9,7 @@ import type {
   RunAttachment,
   RunState,
   RunStatus,
+  SessionContextMessage,
   SessionConnectionInput,
   StartRunInput,
 } from '../contracts.js';
@@ -26,6 +28,7 @@ const ACTIVE_STATUSES = new Set<RunStatus>([
 ]);
 const SUCCESS_STATUSES = new Set<RunStatus>(['completed']);
 const ERROR_STATUSES = new Set<RunStatus>(['blocked', 'failed']);
+const RESUMABLE_STATUSES = new Set<RunStatus>(['stopped', 'failed', 'blocked']);
 
 const statusLabels: Record<RunStatus, string> = {
   initializing: 'Inicializando',
@@ -88,6 +91,8 @@ const ui = {
   runName: element<HTMLElement>('run-name'),
   runTask: element<HTMLElement>('run-task'),
   stopRunButton: element<HTMLButtonElement>('stop-run-button'),
+  resumeRunButton: element<HTMLButtonElement>('resume-run-button'),
+  copyRunLinkButton: element<HTMLButtonElement>('copy-run-link-button'),
   metricIterations: element<HTMLElement>('metric-iterations'),
   iterationProgress: element<HTMLProgressElement>('iteration-progress'),
   metricSse: element<HTMLElement>('metric-sse'),
@@ -115,6 +120,7 @@ const ui = {
   inspectVersion: element<HTMLElement>('inspect-version'),
   doctorWarnings: element<HTMLUListElement>('doctor-warnings'),
   inspectRunId: element<HTMLElement>('inspect-run-id'),
+  inspectSourceRun: element<HTMLElement>('inspect-source-run'),
   inspectSession: element<HTMLElement>('inspect-session'),
   inspectWorkspace: element<HTMLElement>('inspect-workspace'),
   inspectModel: element<HTMLElement>('inspect-model'),
@@ -123,6 +129,10 @@ const ui = {
   inspectSessionActions: element<HTMLElement>('inspect-session-actions'),
   inspectOpenProjectButton: element<HTMLButtonElement>('inspect-open-project-button'),
   inspectCopySessionLinkButton: element<HTMLButtonElement>('inspect-copy-session-link-button'),
+  inspectCopyInfiniteSessionLinkButton: element<HTMLButtonElement>('inspect-copy-infinite-session-link-button'),
+  refreshSessionContextButton: element<HTMLButtonElement>('refresh-session-context-button'),
+  sessionContextStatus: element<HTMLElement>('session-context-status'),
+  sessionContextList: element<HTMLOListElement>('session-context-list'),
   clearLogsButton: element<HTMLButtonElement>('clear-logs-button'),
   logList: element<HTMLOListElement>('log-list'),
   logsEmpty: element<HTMLElement>('logs-empty'),
@@ -182,6 +192,16 @@ let sessionConnection: SessionConnectionInput | null = null;
 let modelCatalog: OpenCodeModelCatalog | null = null;
 let modelCatalogKey: string | null = null;
 let modelRequestId = 0;
+let sessionRequestId = 0;
+let contextRequestId = 0;
+let contextConnectionKey: string | null = null;
+let contextSessionId: string | null = null;
+let contextMessages: SessionContextMessage[] = [];
+let contextError: string | null = null;
+let contextLoading = false;
+let selectedSessionId: string | null = null;
+const pendingDeepLinkTargets: DeepLinkTarget[] = [];
+let initialized = false;
 let dialogMode: 'new' | 'connect' | 'activate' = 'new';
 let activationTarget: OpenCodeSessionSummary | null = null;
 let selectedAttachments: RunAttachment[] = [];
@@ -190,6 +210,27 @@ const pendingSessionModes = new Map<string, boolean>();
 
 function selectedRun(): RunState | null {
   return selectedRunId ? runs.find((run) => run.runId === selectedRunId) ?? null : null;
+}
+
+function sessionContextKey(input: Parameters<DesktopApi['getSessionContext']>[0]): string {
+  return JSON.stringify([
+    input.workspace,
+    input.binary,
+    input.attach,
+    input.sessionRef,
+    input.connectionMode,
+    input.sessionId,
+    input.limit,
+  ]);
+}
+
+function invalidateSessionContext(): void {
+  contextRequestId++;
+  contextConnectionKey = null;
+  contextSessionId = null;
+  contextMessages = [];
+  contextLoading = false;
+  contextError = null;
 }
 
 function errorText(error: unknown): string {
@@ -400,6 +441,123 @@ async function copyInternalSessionLink(sessionId: string, button: HTMLButtonElem
   }
 }
 
+async function copyRunDeepLink(runId: string, button: HTMLButtonElement): Promise<void> {
+  button.disabled = true;
+  try {
+    await api.copyRunDeepLink(runId);
+    toast('Enlace de la corrida copiado.');
+  } catch (error) {
+    toast(errorText(error), true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function copySessionDeepLink(sessionId: string, button: HTMLButtonElement): Promise<void> {
+  button.disabled = true;
+  try {
+    await api.copySessionDeepLink(sessionId);
+    toast('Enlace de la sesión copiado.');
+  } catch (error) {
+    toast(errorText(error), true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function contextTarget(): ({ sessionId: string } & Parameters<DesktopApi['getSessionContext']>[0]) | null {
+  if (selectedSessionId) {
+    const session = sessions.find((candidate) => candidate.id === selectedSessionId);
+    if (!session || !sessionConnection) return null;
+    return {
+      ...sessionConnection,
+      workspace: session.workspace,
+      sessionRef: session.id,
+      connectionMode: sessionConnection.attach === null ? 'desktop-sidecar' : 'attach',
+      sessionId: session.id,
+      limit: 20,
+    };
+  }
+  const run = selectedRun();
+  const sessionId = run ? exactRunSessionId(run) : null;
+  if (!run || !sessionId) return null;
+  return {
+    workspace: run.workspace,
+    binary: run.binary,
+    attach: run.attach,
+    sessionRef: run.sessionRef,
+    connectionMode: run.connectionMode,
+    sessionId,
+    limit: 20,
+  };
+}
+
+function renderSessionContext(): void {
+  const target = contextTarget();
+  const targetKey = target ? sessionContextKey(target) : null;
+  const hasCurrentContext = targetKey !== null
+    && contextConnectionKey === targetKey
+    && contextSessionId === target?.sessionId;
+  ui.refreshSessionContextButton.disabled = target === null || contextLoading;
+  ui.refreshSessionContextButton.textContent = contextLoading ? 'Cargando…' : hasCurrentContext ? 'Actualizar' : 'Cargar';
+  if (!target) {
+    ui.sessionContextStatus.textContent = 'Selecciona una sesión o una ejecución vinculada.';
+  } else if (contextLoading) {
+    ui.sessionContextStatus.textContent = `Leyendo hasta 20 mensajes de ${target.sessionId}…`;
+  } else if (contextError && hasCurrentContext) {
+    ui.sessionContextStatus.textContent = contextError;
+  } else if (!hasCurrentContext) {
+    ui.sessionContextStatus.textContent = 'Contexto no cargado. Solo se lee bajo demanda y no se persiste.';
+  } else {
+    ui.sessionContextStatus.textContent = `${contextMessages.length} mensajes recientes · contexto efímero`;
+  }
+  const fragment = document.createDocumentFragment();
+  if (hasCurrentContext) {
+    for (const message of contextMessages) {
+      const item = document.createElement('li');
+      item.className = 'context-message';
+      item.dataset.role = message.role;
+      const role = document.createElement('strong');
+      role.textContent = message.role === 'user' ? 'Tú' : 'OpenCode';
+      const text = document.createElement('p');
+      text.textContent = message.text;
+      item.append(role, text);
+      fragment.append(item);
+    }
+  }
+  ui.sessionContextList.replaceChildren(fragment);
+}
+
+async function loadSessionContext(): Promise<void> {
+  const target = contextTarget();
+  if (!target) return;
+  const targetKey = sessionContextKey(target);
+  const requestId = ++contextRequestId;
+  contextLoading = true;
+  contextError = null;
+  renderSessionContext();
+  try {
+    const context = await api.getSessionContext(target);
+    const currentTarget = contextTarget();
+    if (requestId !== contextRequestId || !currentTarget || sessionContextKey(currentTarget) !== targetKey) return;
+    contextConnectionKey = targetKey;
+    contextSessionId = context.sessionId;
+    contextMessages = context.messages;
+  } catch (error) {
+    const currentTarget = contextTarget();
+    if (requestId !== contextRequestId || !currentTarget || sessionContextKey(currentTarget) !== targetKey) return;
+    contextConnectionKey = targetKey;
+    contextError = errorText(error);
+    contextSessionId = target.sessionId;
+    contextMessages = [];
+  } finally {
+    if (requestId === contextRequestId) {
+      contextLoading = false;
+      renderSessionContext();
+    }
+  }
+}
+
 function renderSessionList(): void {
   const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const focusedSessionId = activeElement?.dataset.sessionId
@@ -414,6 +572,7 @@ function renderSessionList(): void {
     const item = document.createElement('article');
     item.className = 'session-item';
     item.dataset.status = session.status;
+    item.dataset.selected = String(session.id === selectedSessionId);
     item.dataset.sessionFocusFallback = session.id;
     item.tabIndex = -1;
     const workspaceName = workspaceBasename(session.workspace);
@@ -431,9 +590,9 @@ function renderSessionList(): void {
     meta.textContent = `${workspaceName} · ${sessionStatusLabel(session)} · ${formatRelative(session.updatedAt)}`;
     meta.title = session.workspace;
     content.append(title, meta);
+    const actions = document.createElement('span');
+    actions.className = 'session-actions';
     if (trustedDesktopSessions) {
-      const actions = document.createElement('span');
-      actions.className = 'session-actions';
       const openProject = document.createElement('button');
       openProject.type = 'button';
       openProject.className = 'session-action';
@@ -449,8 +608,27 @@ function renderSessionList(): void {
       copyLink.textContent = 'Copiar enlace interno';
       copyLink.addEventListener('click', () => { void copyInternalSessionLink(session.id, copyLink); });
       actions.append(openProject, copyLink);
-      content.append(actions);
     }
+    const copyInfiniteLink = document.createElement('button');
+    copyInfiniteLink.type = 'button';
+    copyInfiniteLink.className = 'session-action';
+    copyInfiniteLink.dataset.sessionId = session.id;
+    copyInfiniteLink.dataset.sessionAction = 'copy-infinite-link';
+    copyInfiniteLink.textContent = 'Copiar enlace Infinite';
+    copyInfiniteLink.addEventListener('click', () => { void copySessionDeepLink(session.id, copyInfiniteLink); });
+    const context = document.createElement('button');
+    context.type = 'button';
+    context.className = 'session-action';
+    context.dataset.sessionId = session.id;
+    context.dataset.sessionAction = 'context';
+    context.textContent = 'Ver contexto';
+    context.addEventListener('click', () => {
+      selectedSessionId = session.id;
+      render();
+      void loadSessionContext();
+    });
+    actions.append(copyInfiniteLink, context);
+    content.append(actions);
 
     const label = document.createElement('label');
     label.className = 'session-switch';
@@ -544,6 +722,8 @@ function renderRunList(): void {
     button.append(head, meta);
     button.addEventListener('click', () => {
       selectedRunId = run.runId;
+      selectedSessionId = null;
+      invalidateSessionContext();
       render();
       ui.workspaceMain.focus();
     });
@@ -587,6 +767,7 @@ function renderSelectedRun(): void {
   ui.runDetail.hidden = run === null;
   if (!run) {
     ui.inspectRunId.textContent = '—';
+    ui.inspectSourceRun.textContent = '—';
     ui.inspectSession.textContent = '—';
     ui.inspectWorkspace.textContent = '—';
     ui.inspectModel.textContent = 'Predeterminado';
@@ -595,6 +776,10 @@ function renderSelectedRun(): void {
     ui.inspectSessionActions.hidden = true;
     ui.inspectOpenProjectButton.disabled = true;
     ui.inspectCopySessionLinkButton.disabled = true;
+    ui.inspectCopyInfiniteSessionLinkButton.disabled = true;
+    ui.copyRunLinkButton.hidden = true;
+    ui.resumeRunButton.hidden = true;
+    ui.stopRunButton.hidden = true;
     return;
   }
 
@@ -610,6 +795,9 @@ function renderSelectedRun(): void {
   ui.runTask.textContent = run.task;
   ui.stopRunButton.hidden = !active;
   ui.stopRunButton.disabled = run.status === 'stopping';
+  ui.copyRunLinkButton.hidden = false;
+  ui.resumeRunButton.hidden = !RESUMABLE_STATUSES.has(run.status);
+  ui.resumeRunButton.disabled = hasActiveRun();
 
   ui.metricIterations.textContent = `${formatInteger(run.iteration)} / ${formatInteger(run.maxIterations)}`;
   ui.iterationProgress.max = Math.max(1, run.maxIterations);
@@ -631,6 +819,8 @@ function renderSelectedRun(): void {
 
   ui.inspectRunId.textContent = run.runId;
   ui.inspectRunId.title = run.runId;
+  ui.inspectSourceRun.textContent = run.sourceRunId ?? 'Corrida inicial';
+  ui.inspectSourceRun.title = run.sourceRunId ?? '';
   ui.inspectSession.textContent = run.sessionId ?? run.sessionRef ?? 'Pendiente';
   ui.inspectSession.title = ui.inspectSession.textContent;
   ui.inspectWorkspace.textContent = run.workspace;
@@ -643,6 +833,7 @@ function renderSelectedRun(): void {
   ui.inspectOpenProjectButton.disabled = !trustedDesktopSession;
   const sessionId = trustedDesktopSession ? exactRunSessionId(run) : null;
   ui.inspectCopySessionLinkButton.disabled = sessionId === null;
+  ui.inspectCopyInfiniteSessionLinkButton.disabled = sessionId === null;
   ui.inspectCopySessionLinkButton.title = !trustedDesktopSession
     ? 'Disponible solo para sesiones verificadas por OpenCode Desktop.'
     : sessionId === null ? 'La sesión todavía no está disponible.' : '';
@@ -654,6 +845,7 @@ function render(): void {
   renderRunList();
   renderSessionList();
   renderSelectedRun();
+  renderSessionContext();
 }
 
 function renderDoctor(result: DoctorResult): void {
@@ -918,10 +1110,13 @@ function connectionInput(): SessionConnectionInput {
 }
 
 async function loadSessions(input: SessionConnectionInput, showToast = true): Promise<void> {
+  const requestId = ++sessionRequestId;
   ui.sessionList.setAttribute('aria-busy', 'true');
   try {
     const next = await api.listSessions(input);
-    sessionConnection = input;
+    if (requestId !== sessionRequestId) return;
+    invalidateSessionContext();
+    sessionConnection = { ...input };
     sessions = next;
     ui.sessionsConnectButton.textContent = input.attach
       ? 'Servidor manual conectado · Cambiar…'
@@ -930,7 +1125,7 @@ async function loadSessions(input: SessionConnectionInput, showToast = true): Pr
     void loadModels({ ...input, sessionRef: null }).catch(() => undefined);
     if (showToast) toast(`${next.length} sesiones cargadas.`);
   } finally {
-    ui.sessionList.setAttribute('aria-busy', 'false');
+    if (requestId === sessionRequestId) ui.sessionList.setAttribute('aria-busy', 'false');
   }
 }
 
@@ -959,6 +1154,8 @@ async function submitRun(event: SubmitEvent): Promise<void> {
       ? await api.setContinuous({ enabled: true, sessionId: activationTarget.id, run: runInput })
       : await api.startRun(runInput);
     selectedRunId = receipt.runId;
+    selectedSessionId = null;
+    invalidateSessionContext();
     sessionConnection = connectionInput();
     closeRunDialog();
     appendLog('info', `${dialogMode === 'activate' ? 'Modo continuo' : 'Ejecución'} ${receipt.runId} iniciado.`);
@@ -1077,6 +1274,55 @@ async function stopSelectedRun(): Promise<void> {
   }
 }
 
+async function resumeSelectedRun(): Promise<void> {
+  const run = selectedRun();
+  if (!run || !RESUMABLE_STATUSES.has(run.status) || hasActiveRun()) return;
+  if (!window.confirm(`Se creará una nueva corrida sucesora de “${run.name}” y se retomará la sesión exacta si sigue disponible. ¿Continuar?`)) return;
+  ui.resumeRunButton.disabled = true;
+  try {
+    const receipt = await api.resumeRun({ runId: run.runId, confirmed: true });
+    const successor = await api.getRun(receipt.runId);
+    upsertRun(successor);
+    selectedRunId = successor.runId;
+    selectedSessionId = null;
+    invalidateSessionContext();
+    render();
+    toast('Corrida reanudada como una ejecución sucesora.');
+  } catch (error) {
+    const message = errorText(error);
+    appendLog('error', `Reanudar: ${message}`);
+    toast(message, true);
+  } finally {
+    ui.resumeRunButton.disabled = false;
+    render();
+  }
+}
+
+function applyDeepLinkTarget(target: DeepLinkTarget): void {
+  if (target.kind === 'run') {
+    const run = runs.find((candidate) => candidate.runId === target.id);
+    if (!run) {
+      toast('La corrida referenciada no existe en este dispositivo.', true);
+      return;
+    }
+    selectedRunId = run.runId;
+    selectedSessionId = null;
+    invalidateSessionContext();
+    setSidebarView('runs');
+    render();
+    ui.workspaceMain.focus();
+    return;
+  }
+  selectedSessionId = target.id;
+  invalidateSessionContext();
+  setSidebarView('sessions');
+  render();
+  const item = [...ui.sessionList.querySelectorAll<HTMLElement>('[data-session-focus-fallback]')]
+    .find((candidate) => candidate.dataset.sessionFocusFallback === target.id);
+  if (item) item.focus();
+  else toast('Sesión seleccionada. Conecta su catálogo para verla; no se inició ninguna acción.');
+}
+
 function handleDesktopEvent(event: DesktopEvent): void {
   switch (event.type) {
     case 'run-changed':
@@ -1084,6 +1330,8 @@ function handleDesktopEvent(event: DesktopEvent): void {
       render();
       break;
     case 'operation-finished':
+      if (event.run.sessionRef) pendingSessionModes.delete(event.run.sessionRef);
+      if (event.run.sessionId) pendingSessionModes.delete(event.run.sessionId);
       upsertRun(event.run);
       appendLog(event.run.status === 'completed' ? 'info' : 'warn', `${event.run.name}: ${statusLabels[event.run.status]}.`);
       toast(`${event.run.name}: ${statusLabels[event.run.status].toLowerCase()}.`, ERROR_STATUSES.has(event.run.status));
@@ -1103,6 +1351,13 @@ function handleDesktopEvent(event: DesktopEvent): void {
         }
       }
       render();
+      break;
+    case 'deep-link':
+      if (!initialized) {
+        if (pendingDeepLinkTargets.length >= 20) pendingDeepLinkTargets.shift();
+        pendingDeepLinkTargets.push(event.target);
+      }
+      else applyDeepLinkTarget(event.target);
       break;
     case 'log':
       appendLog(event.level, event.message, event.timestamp);
@@ -1219,6 +1474,12 @@ function wireEvents(): () => void {
   ui.inspectorDoctorButton.addEventListener('click', () => { void runDoctor(); });
   ui.dialogDoctorButton.addEventListener('click', () => { void runDoctor(); });
   ui.stopRunButton.addEventListener('click', () => { void stopSelectedRun(); });
+  ui.resumeRunButton.addEventListener('click', () => { void resumeSelectedRun(); });
+  ui.copyRunLinkButton.addEventListener('click', () => {
+    const run = selectedRun();
+    if (run) void copyRunDeepLink(run.runId, ui.copyRunLinkButton);
+  });
+  ui.refreshSessionContextButton.addEventListener('click', () => { void loadSessionContext(); });
   ui.inspectOpenProjectButton.addEventListener('click', () => {
     const run = selectedRun();
     if (run?.attach === null) void openProjectInOpenCode(run.workspace, ui.inspectOpenProjectButton);
@@ -1227,6 +1488,11 @@ function wireEvents(): () => void {
     const run = selectedRun();
     const sessionId = run?.attach === null ? exactRunSessionId(run) : null;
     if (sessionId) void copyInternalSessionLink(sessionId, ui.inspectCopySessionLinkButton);
+  });
+  ui.inspectCopyInfiniteSessionLinkButton.addEventListener('click', () => {
+    const run = selectedRun();
+    const sessionId = run ? exactRunSessionId(run) : null;
+    if (sessionId) void copySessionDeepLink(sessionId, ui.inspectCopyInfiniteSessionLinkButton);
   });
   ui.clearLogsButton.addEventListener('click', () => {
     logs = [];
@@ -1272,6 +1538,8 @@ async function initialize(): Promise<void> {
     appendLog('error', `Historial: ${errorText(error)}`);
     render();
   }
+  initialized = true;
+  for (const target of pendingDeepLinkTargets.splice(0)) applyDeepLinkTarget(target);
   await runDoctor(false);
 }
 

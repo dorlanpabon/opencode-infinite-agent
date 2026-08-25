@@ -6,12 +6,15 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const BRIDGE_VERSION = 4;
+const BRIDGE_VERSION = 5;
 const BRIDGE_BUILD_ID = createHash('sha256').update(readFileSync(fileURLToPath(import.meta.url))).digest('hex');
 const GLOBAL_SESSION_PAGE_SIZE = 100;
 const MAX_GLOBAL_SESSION_PAGES = 50;
 const MAX_BODY_BYTES = 64 * 1024 * 1024;
 const SESSION_ID = /^ses_[A-Za-z0-9]+$/u;
+const MAX_CONTEXT_MESSAGES = 20;
+const MAX_CONTEXT_MESSAGE_TEXT = 4_000;
+const MAX_CONTEXT_TEXT = 24_000;
 const REGISTRY_STATE = Symbol.for('opencode-infinite-agent.desktop-bridge.registry');
 const registryState = globalThis[REGISTRY_STATE] ??= { cleanupRegistered: false, files: new Set() };
 let globalCatalogAvailable;
@@ -255,6 +258,49 @@ function sessionRoute(pathname) {
   return { id: match[1], action: match[2] ?? 'get' };
 }
 
+function contextLimit(url) {
+  const values = url.searchParams.getAll('limit');
+  if (values.length === 0) return MAX_CONTEXT_MESSAGES;
+  if (values.length !== 1 || !/^(?:[1-9]|1\d|20)$/u.test(values[0])) {
+    const error = new Error('El límite de contexto debe ser un entero entre 1 y 20.');
+    error.status = 400;
+    throw error;
+  }
+  return Number(values[0]);
+}
+
+function safeContextMessages(value, limit) {
+  const rawMessages = Array.isArray(value) ? value : value && typeof value === 'object' && Array.isArray(value.data) ? value.data : [];
+  const selected = [];
+  let remaining = MAX_CONTEXT_TEXT;
+  for (let index = rawMessages.length - 1; index >= 0; index -= 1) {
+    if (selected.length >= limit || remaining <= 0) break;
+    const raw = rawMessages[index];
+    if (!raw || typeof raw !== 'object') continue;
+    const info = raw.info && typeof raw.info === 'object' ? raw.info : raw;
+    if (info.synthetic === true || raw.synthetic === true || (info.role !== 'user' && info.role !== 'assistant')) continue;
+    const parts = Array.isArray(raw.parts) ? raw.parts : [];
+    const chunks = [];
+    let messageRemaining = Math.min(MAX_CONTEXT_MESSAGE_TEXT, remaining);
+    for (const part of parts) {
+      if (!part || typeof part !== 'object' || part.type !== 'text' || part.synthetic === true || typeof part.text !== 'string') continue;
+      let start = 0;
+      while (start < part.text.length && /\s/u.test(part.text[start])) start += 1;
+      const separator = chunks.length === 0 ? 0 : 1;
+      const text = part.text.slice(start, start + Math.max(0, messageRemaining - separator)).trimEnd();
+      if (!text) continue;
+      chunks.push(text);
+      messageRemaining -= separator + text.length;
+      if (messageRemaining <= 0) break;
+    }
+    const text = chunks.join('\n');
+    if (!text) continue;
+    selected.push({ role: info.role, text });
+    remaining -= text.length;
+  }
+  return selected.reverse();
+}
+
 export const OpenCodeInfiniteBridge = async ({ client, directory, project, worktree }) => {
   const bridgeId = randomBytes(16).toString('hex');
   const token = randomBytes(32).toString('hex');
@@ -335,11 +381,12 @@ export const OpenCodeInfiniteBridge = async ({ client, directory, project, workt
       }
 
       if (route && request.method === 'GET' && route.action === 'message') {
+        const limit = contextLimit(url);
         const data = await sdkData(client.session.messages({
           path: { id: route.id },
-          query: { directory: scopedDirectory },
+          query: { directory: scopedDirectory, limit },
         }));
-        json(response, 200, data ?? []);
+        json(response, 200, safeContextMessages(data, limit));
         return;
       }
 

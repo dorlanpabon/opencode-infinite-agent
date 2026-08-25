@@ -3,9 +3,11 @@ import type {
   OpenCodeModelCatalog,
   OpenCodeSessionStatus,
   OpenCodeSessionSummary,
+  SessionContext,
   SessionConnectionInput,
 } from './contracts.js';
 import { loadOpenCodeModelCatalog } from './model-catalog.js';
+import { parseSessionContextPayload } from './session-context.js';
 
 interface ServerHandle {
   base: string;
@@ -252,6 +254,19 @@ export class OpenCodeSessionCatalog {
       current.input.workspace,
       current.controller.signal,
     );
+  }
+
+  async context(sessionId: string, limit: number): Promise<SessionContext> {
+    const current = this.connection;
+    if (!current) throw new Error('El catálogo de sesiones no está conectado.');
+    const value = await this.dependencies.server.request(
+      current.handle.base,
+      'GET',
+      `/session/${sessionId}/message?limit=${limit}`,
+      null,
+      { directory: current.input.workspace, timeoutMs: 10_000, signal: current.controller.signal, maxResponseBytes: 2 * 1024 * 1024 },
+    );
+    return parseSessionContextPayload(sessionId, value, limit);
   }
 
   async close(): Promise<void> {
