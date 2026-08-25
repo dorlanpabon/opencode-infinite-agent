@@ -288,6 +288,7 @@ export class OpenCodeDesktopBridgeCatalog {
   private openingControllers = new Set<AbortController>();
   private bridgeFailures = new Map<string, number>();
   private authenticatedEndpoints = new Set<string>();
+  private requestedWorkspace: string | null = null;
   private disposed = false;
 
   constructor(
@@ -319,6 +320,7 @@ export class OpenCodeDesktopBridgeCatalog {
     if (this.disposed) throw new Error('El catálogo de OpenCode Desktop está cerrado.');
     await this.release();
     this.sessionReference = sessionIdFromReference(input.sessionRef);
+    this.requestedWorkspace = path.resolve(input.workspace);
     const installation = await installPlugin(this.dependencies);
     const descriptors = await this.discover(installation.buildId);
     if (descriptors.length === 0) {
@@ -516,18 +518,34 @@ export class OpenCodeDesktopBridgeCatalog {
     sessionId: string,
     results: Array<{ descriptor: DesktopBridgeDescriptor; statuses: Record<string, unknown> }>,
   ): Promise<{ summary: OpenCodeSessionSummary; endpoint: DesktopBridgeDescriptor; score: number } | null> {
+    const requestedWorkspace = this.requestedWorkspace;
+    if (!requestedWorkspace) return null;
     const attempts = await Promise.allSettled(results.map(async ({ descriptor, statuses }) => {
       const raw = await this.dependencies.server.request(
         descriptor.endpoint,
         'GET',
         `/session/${sessionId}`,
         null,
-        { directory: descriptor.directory, timeoutMs: 5_000 },
+        { directory: requestedWorkspace, timeoutMs: 5_000 },
       );
       if (!isRecord(raw)) return null;
-      const summary = summaryOf(raw, statuses[sessionId], descriptor.directory);
+      const scopedStatuses = normalizedPath(requestedWorkspace) === normalizedPath(descriptor.directory)
+        ? statuses
+        : await this.dependencies.server.request(
+          descriptor.endpoint,
+          'GET',
+          '/session/status',
+          null,
+          { directory: requestedWorkspace, timeoutMs: 5_000 },
+        );
+      const summary = summaryOf(
+        raw,
+        isRecord(scopedStatuses) ? scopedStatuses[sessionId] : null,
+        requestedWorkspace,
+      );
       if (!summary) return null;
-      if (!ownsSession(descriptor, raw, summary.workspace)) return null;
+      if (normalizedPath(summary.workspace) !== normalizedPath(requestedWorkspace)) return null;
+      if (raw.projectID !== 'global' && !ownsSession(descriptor, raw, summary.workspace)) return null;
       const endpoint = routeDescriptor(descriptor, raw, summary.workspace);
       const score = 2
         + (normalizedPath(summary.workspace) === normalizedPath(descriptor.directory) ? 1 : 0)

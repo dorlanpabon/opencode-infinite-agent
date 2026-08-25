@@ -78,6 +78,9 @@ async function fixture() {
       if (pathname === '/session/ses_wrong1') {
         return { id: 'ses_wrong1', title: 'Directa ajena', directory: otherWorkspace, projectID: 'other', time: { created: 3, updated: 4 } };
       }
+      if (pathname === '/session/ses_global1') {
+        return { id: 'ses_global1', title: 'Global exacta', directory: otherWorkspace, projectID: 'global', time: { created: 3, updated: 5 } };
+      }
       throw new Error(`unexpected ${method} ${pathname}`);
     },
   };
@@ -167,6 +170,29 @@ test('adopción rechaza una sesión exacta si el bridge no pertenece a su proyec
   });
   assert.equal(result.sessions.some((session) => session.id === 'ses_wrong1'), false);
   assert.throws(() => catalog.endpointForSession('ses_wrong1'), /no está disponible/iu);
+});
+
+test('adopta una sesión global exacta desde el workspace solicitado aunque no exista su descriptor', async (t) => {
+  const fx = await fixture();
+  t.after(() => rm(fx.root, { recursive: true, force: true }));
+  await writeFile(path.join(fx.registry, 'bridge.json'), JSON.stringify(fx.descriptor));
+  const catalog = new OpenCodeDesktopBridgeCatalog(() => undefined, fx.dependencies);
+  t.after(() => catalog.close());
+
+  const result = await catalog.connect({
+    workspace: fx.otherWorkspace,
+    binary: null,
+    attach: null,
+    sessionRef: 'ses_global1',
+  });
+
+  const adopted = result.sessions.find((session) => session.id === 'ses_global1');
+  assert.equal(adopted?.workspace, fx.otherWorkspace);
+  assert.equal(catalog.endpointForSession('ses_global1').directory, fx.otherWorkspace);
+  assert.equal(
+    fx.calls.some((call) => call.pathname === '/session/ses_global1' && call.options.directory === fx.otherWorkspace),
+    true,
+  );
 });
 
 test('si no hay bridge instala el plugin global sin sobrescribir archivos ajenos', async (t) => {

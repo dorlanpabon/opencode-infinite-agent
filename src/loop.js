@@ -78,6 +78,38 @@ function isConfirmedPromptRejection(error) {
   return Number.isInteger(status) && status >= 400 && status < 500 && ![408, 425, 429].includes(status);
 }
 
+function agentErrorDetails(error) {
+  const value = error && typeof error === 'object' ? error : {};
+  const data = value.data && typeof value.data === 'object' ? value.data : {};
+  const rawStatus = data.statusCode ?? value.statusCode ?? value.status;
+  const status = rawStatus === null || rawStatus === undefined || rawStatus === '' ? Number.NaN : Number(rawStatus);
+  const rawMessage = data.message ?? value.message;
+  return {
+    name: typeof value.name === 'string' && value.name ? value.name : 'AgentError',
+    message: typeof rawMessage === 'string'
+      ? rawMessage.replace(/[\r\n\t]+/gu, ' ').trim().slice(0, 240)
+      : '',
+    retryable: typeof data.isRetryable === 'boolean'
+      ? data.isRetryable
+      : (typeof value.isRetryable === 'boolean' ? value.isRetryable : null),
+    status: Number.isInteger(status) ? status : null,
+  };
+}
+
+function nonRetryableAgentError(error) {
+  const details = agentErrorDetails(error);
+  return details.retryable === false
+    || (details.status !== null && details.status >= 400 && details.status < 500
+      && ![408, 425, 429].includes(details.status));
+}
+
+function agentErrorSummary(error) {
+  const details = agentErrorDetails(error);
+  const status = details.status === null ? '' : ` ${details.status}`;
+  const message = details.message ? `: ${details.message}` : '';
+  return `${details.name}${status}${message}`;
+}
+
 // Arma el monitor antes de prompt_async. Los eventos solo despiertan una
 // reconciliacion; el siguiente prompt requiere assistant terminal persistido e idle.
 async function awaitTicket(ticket, flag) {
@@ -335,7 +367,13 @@ async function runLoop({
       const agentErr = messageError(reply.info);
       if (agentErr) {
         consecutiveErrors++;
-        log.warn(`El agente reporto error: ${JSON.stringify(agentErr).slice(0, 250)}`);
+        const summary = agentErrorSummary(agentErr);
+        log.warn(`El agente reporto error: ${summary}`);
+        if (nonRetryableAgentError(agentErr)) {
+          status = 'error';
+          reason = `Error no reintentable del agente/proveedor: ${summary}`;
+          break;
+        }
         if (consecutiveErrors >= cfg.maxConsecutiveErrors) {
           status = 'error';
           reason = 'Errores repetidos del agente/proveedor';

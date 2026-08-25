@@ -522,6 +522,37 @@ test('errores terminales consecutivos del proveedor detienen el ciclo', async ()
   assert.equal(api.state.prompts.length, 2);
 });
 
+test('un error no reintentable del proveedor detiene el ciclo tras el primer turno', async () => {
+  const sessionId = 'ses_provider_non_retryable';
+  const stream = fakeEventStream();
+  const api = harness(sessionId, stream);
+  const run = runLoop({
+    req: api.req,
+    sessionId,
+    cfg: cfg({ maxIterations: 8, maxConsecutiveErrors: 5 }),
+    firstPrompt: 'provider balance task',
+    flag: { aborted: false, signal: new AbortController().signal },
+    log: logger(),
+    eventStream: stream,
+  });
+
+  await waitFor(() => api.state.prompts.length === 1);
+  const reply = assistant('msg_provider_balance', sessionId, '', true, api.state.promptIds[0]);
+  reply.info.error = {
+    name: 'APIError',
+    data: { message: 'Insufficient Balance', statusCode: 402, isRetryable: false },
+  };
+  api.state.messages.push(reply);
+  api.state.status = {};
+  stream.emit({ type: 'message.updated', properties: { info: reply.info } });
+  stream.emit({ type: 'session.idle', properties: { sessionID: sessionId } });
+
+  const result = await run;
+  assert.equal(result.status, 'error');
+  assert.match(result.reason, /no reintentable.*402.*Insufficient Balance/iu);
+  assert.equal(api.state.prompts.length, 1);
+});
+
 test('error de transporte ambiguo espera el turno aceptado sin duplicarlo', async () => {
   const sessionId = 'ses_ambiguous';
   const stream = fakeEventStream();
