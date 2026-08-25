@@ -8,6 +8,10 @@ import type {
   SessionConnectionInput,
 } from './contracts.js';
 
+const { parseSessionRef } = require('../session-ref.js') as {
+  parseSessionRef(input: unknown): string | null;
+};
+
 interface EventStream {
   ready: Promise<void>;
   subscribe(listener: (event: unknown) => void): () => void;
@@ -139,7 +143,7 @@ function sanitizedBridgeFailure(value: unknown): Error {
   return failure;
 }
 
-function preferredAdoptionFailure(attempts: PromiseSettledResult<unknown>[]): Error | null {
+function preferredBridgeFailure(attempts: PromiseSettledResult<unknown>[]): Error | null {
   const rejections = attempts.flatMap((attempt) => attempt.status === 'rejected' ? [attempt.reason] : []);
   const selected = rejections.find(isConfigInvalidFailure)
     ?? rejections.find((reason) => {
@@ -161,9 +165,7 @@ function eventType(value: unknown): string | null {
 }
 
 function sessionIdFromReference(value: string | null): string | null {
-  if (!value) return null;
-  const match = /ses_[A-Za-z0-9]+/u.exec(value);
-  return match?.[0] ?? null;
+  return parseSessionRef(value);
 }
 
 function connectionKey(input: SessionConnectionInput): string {
@@ -249,14 +251,25 @@ function parseDescriptor(value: unknown): DesktopBridgeDescriptor | null {
   };
 }
 
+function explicitSessionWorkspace(raw: Record<string, unknown>): string | null {
+  return typeof raw.directory === 'string' && path.isAbsolute(raw.directory) ? raw.directory : null;
+}
+
+function sessionWorkspace(raw: Record<string, unknown>, fallbackWorkspace: string): string | null {
+  const explicit = explicitSessionWorkspace(raw);
+  return raw.projectID === 'global' ? explicit : explicit ?? fallbackWorkspace;
+}
+
 function summaryOf(raw: Record<string, unknown>, status: unknown, fallbackWorkspace: string): OpenCodeSessionSummary | null {
   if (typeof raw.id !== 'string' || !SESSION_ID.test(raw.id)) return null;
+  const workspace = sessionWorkspace(raw, fallbackWorkspace);
+  if (!workspace) return null;
   const time = isRecord(raw.time) ? raw.time : {};
   const sessionStatus = statusOf(status);
   return {
     id: raw.id,
     title: typeof raw.title === 'string' && raw.title.trim() ? raw.title.slice(0, 512) : raw.id,
-    workspace: typeof raw.directory === 'string' && path.isAbsolute(raw.directory) ? raw.directory : fallbackWorkspace,
+    workspace,
     createdAt: timestamp(time.created),
     updatedAt: timestamp(time.updated ?? time.created),
     status: sessionStatus.status,
@@ -289,8 +302,11 @@ function ownsSession(
   workspace: string,
 ): boolean {
   if (typeof raw.projectID !== 'string' || raw.projectID !== descriptor.projectID) return false;
-  return raw.projectID !== 'global'
-    || normalizedPath(workspace) === normalizedPath(descriptor.directory);
+  if (raw.projectID !== 'global') return true;
+  const explicit = explicitSessionWorkspace(raw);
+  return explicit !== null
+    && normalizedPath(workspace) === normalizedPath(explicit)
+    && normalizedPath(explicit) === normalizedPath(descriptor.directory);
 }
 
 async function installPlugin(dependencies: DesktopBridgeDependencies): Promise<{
@@ -367,8 +383,12 @@ export class OpenCodeDesktopBridgeCatalog {
 
   private async open(input: SessionConnectionInput): Promise<{ sessions: OpenCodeSessionSummary[] }> {
     if (this.disposed) throw new Error('El catálogo de OpenCode Desktop está cerrado.');
+    const sessionReference = sessionIdFromReference(input.sessionRef);
+    if (input.sessionRef !== null && !sessionReference) {
+      throw new TypeError('La referencia de sesión OpenCode no es válida.');
+    }
     await this.release();
-    this.sessionReference = sessionIdFromReference(input.sessionRef);
+    this.sessionReference = sessionReference;
     this.requestedWorkspace = path.resolve(input.workspace);
     const installation = await installPlugin(this.dependencies);
     const descriptors = await this.discover(installation.buildId);
@@ -508,6 +528,8 @@ export class OpenCodeDesktopBridgeCatalog {
           this.active = this.active.filter((endpoint) => !failed.has(endpoint.descriptor.bridgeId));
         }
         if (results.length === 0) {
+          const failure = preferredBridgeFailure(settled);
+          if (failure) throw failure;
           if (this.snapshot.length > 0 && this.active.length > 0) continue;
           this.endpointBySession.clear();
           this.snapshot = [];
@@ -604,7 +626,7 @@ export class OpenCodeDesktopBridgeCatalog {
     const matches = attempts.flatMap((attempt) => attempt.status === 'fulfilled' && attempt.value ? [attempt.value] : []);
     matches.sort((a, b) => b.score - a.score);
     if (matches[0]) return matches[0];
-    const failure = preferredAdoptionFailure(attempts);
+    const failure = preferredBridgeFailure(attempts);
     if (failure) throw failure;
     return null;
   }

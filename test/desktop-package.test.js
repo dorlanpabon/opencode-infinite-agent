@@ -57,6 +57,18 @@ test('renderer conserva navegación y foco accesibles en sesiones', async () => 
   assert.match(renderer, /copyOpenCodeSessionLink/u);
   assert.match(renderer, /Abrir proyecto en OpenCode/u);
   assert.match(renderer, /Copiar enlace interno/u);
+  assert.match(rendererSource, /function workspaceBasename\(workspace: string\)/u);
+  assert.match(rendererSource, /meta\.textContent = `\$\{workspaceName\} ·/u);
+  assert.match(rendererSource, /meta\.title = session\.workspace/u);
+  assert.match(rendererSource, /Workspace \$\{workspaceName\}: \$\{session\.workspace\}/u);
+  assert.match(rendererSource, /const trustedDesktopSessions = sessionConnection\?\.attach === null/u);
+  assert.match(rendererSource, /if \(trustedDesktopSessions\) \{/u);
+  assert.match(rendererSource, /openProject\.dataset\.sessionId = session\.id/u);
+  assert.match(rendererSource, /copyLink\.dataset\.sessionId = session\.id/u);
+  assert.match(rendererSource, /button\.dataset\.sessionAction === focusedSessionAction/u);
+  assert.match(rendererSource, /const trustedDesktopSession = run\.attach === null/u);
+  assert.match(rendererSource, /ui\.inspectSessionActions\.hidden = !trustedDesktopSession/u);
+  assert.match(rendererSource, /ui\.inspectOpenProjectButton\.disabled = !trustedDesktopSession/u);
   assert.match(html, /id="inspect-open-project-button"/u);
   assert.match(html, /id="inspect-copy-session-link-button"/u);
   assert.match(

@@ -1,5 +1,8 @@
 export const DESKTOP_ORIGIN = 'opencode-infinite://app';
 
+const SESSION_ID_REFERENCE = /^ses_[A-Za-z0-9]+$/u;
+const INTERNAL_SESSION_LINK = /^oc:\/\/renderer\/server\/c2lkZWNhcg\/session\/ses_[A-Za-z0-9]+$/u;
+
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 export type SseState = 'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'closed';
 export type RunStatus =
@@ -280,11 +283,10 @@ export function parseStartRunInput(value: unknown): StartRunInput {
     throw new TypeError('Confirma explícitamente la autoaprobación antes de iniciar.');
   }
   const sessionRef = normalizedOptional(value.sessionRef);
-  if (sessionRef !== null && !/^ses_[A-Za-z0-9]+$/u.test(sessionRef)
-    && !/^oc:\/\/[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]+$/u.test(sessionRef)) {
-    throw new TypeError('La sesión debe ser un ID ses_… o un deeplink oc:// válido.');
+  if (sessionRef !== null && !SESSION_ID_REFERENCE.test(sessionRef) && !INTERNAL_SESSION_LINK.test(sessionRef)) {
+    throw new TypeError('La sesión debe ser un ID ses_… o un enlace interno de OpenCode Desktop válido.');
   }
-  if (value.resumeExisting && (sessionRef === null || !/^ses_[A-Za-z0-9]+$/u.test(sessionRef))) {
+  if (value.resumeExisting && (sessionRef === null || !SESSION_ID_REFERENCE.test(sessionRef))) {
     throw new TypeError('El modo continuo requiere un ID de sesión ses_… exacto.');
   }
   return {
@@ -318,9 +320,8 @@ export function parseSessionConnectionInput(value: unknown): SessionConnectionIn
     throw new TypeError('Parámetros de sesiones inválidos.');
   }
   const sessionRef = normalizedOptional(value.sessionRef);
-  if (sessionRef !== null && !/^ses_[A-Za-z0-9]+$/u.test(sessionRef)
-    && !/^oc:\/\/[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]+$/u.test(sessionRef)) {
-    throw new TypeError('La sesión debe ser un ID ses_… o un enlace oc:// válido.');
+  if (sessionRef !== null && !SESSION_ID_REFERENCE.test(sessionRef) && !INTERNAL_SESSION_LINK.test(sessionRef)) {
+    throw new TypeError('La sesión debe ser un ID ses_… o un enlace interno de OpenCode Desktop válido.');
   }
   return {
     workspace: value.workspace.trim(),
