@@ -211,6 +211,7 @@ test('catálogo no cambia de servidor mientras el run global está activo', asyn
   await manager.initialize();
   await manager.listSessions({ workspace, binary: null, attach: null });
   await manager.start(input(workspace));
+  await manager.listSessions({ workspace, binary: null, attach: null });
   await assert.rejects(
     manager.listSessions({ workspace: other, binary: null, attach: null }),
     (error) => error && error.code === 'ENGINE_BUSY',

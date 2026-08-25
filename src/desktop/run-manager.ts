@@ -275,11 +275,14 @@ export class RunManager {
       throw new DesktopRunError('SESSIONS_UNAVAILABLE', 'El motor OpenCode no expone un catálogo de sesiones.');
     }
     const activeState = [...this.active.keys()].map((runId) => this.states.get(runId)).find(Boolean);
-    if (activeState && sessionConnectionKey(input) !== sessionConnectionKey(activeState)) {
-      throw new DesktopRunError(
-        'ENGINE_BUSY',
-        'No se puede cambiar el servidor de sesiones mientras existe una ejecución activa.',
-      );
+    if (activeState) {
+      if (sessionConnectionKey(input) !== sessionConnectionKey(activeState)) {
+        throw new DesktopRunError(
+          'ENGINE_BUSY',
+          'No se puede cambiar el servidor de sesiones mientras existe una ejecución activa.',
+        );
+      }
+      return this.decorateSessions();
     }
     const sessions = await this.adapter.listSessions(input, (next) => this.updateCatalog(next));
     this.updateCatalog(sessions);

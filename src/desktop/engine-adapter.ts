@@ -7,6 +7,7 @@ import type {
 } from './contracts.js';
 import type { DesktopEngineAdapter, EngineRunContext, EngineRunResult } from './run-manager.js';
 import { assertAttachmentMetadata } from './attachments.js';
+import { OpenCodeDesktopBridgeCatalog } from './desktop-bridge.js';
 import { OpenCodeSessionCatalog } from './session-catalog.js';
 
 interface AgentResult {
@@ -105,6 +106,7 @@ async function run(
   input: StartRunInput,
   context: EngineRunContext,
   catalog: OpenCodeSessionCatalog,
+  desktopCatalog: OpenCodeDesktopBridgeCatalog,
 ): Promise<EngineRunResult> {
   const controller = new AbortController();
   let wallLimited = false;
@@ -117,16 +119,30 @@ async function run(
   }, Math.max(1, Math.floor(input.maxHours * 60 * 60 * 1000)));
 
   emit(context, { type: 'phase', status: 'connecting', detail: 'Conectando al stream de eventos de OpenCode…' });
+  let desktopSessionId: string | null = null;
   try {
     const connectionInput: SessionConnectionInput = {
       workspace: input.workspace,
       binary: input.binary,
       attach: input.attach,
+      sessionRef: input.sessionRef,
     };
-    const connection = await catalog.connect(connectionInput);
     const ref = input.sessionRef;
+    const isDesktopSession = input.resumeExisting && input.attach === null && Boolean(ref?.startsWith('ses_'));
+    let connection;
+    if (isDesktopSession) {
+      await desktopCatalog.connect(connectionInput);
+      connection = desktopCatalog.endpointForSession(ref!);
+    } else {
+      connection = await catalog.connect(connectionInput);
+    }
+    const executionWorkspace = 'directory' in connection ? connection.directory : input.workspace;
+    if (isDesktopSession) desktopSessionId = ref;
+    if (desktopSessionId && input.autoApprove) {
+      throw new Error('OpenCode Desktop no permite autoaprobar de forma fiable los permisos de una sesión existente. Confírmalos en OpenCode.');
+    }
     const result = await agentModule.executeAgent({
-      dir: input.workspace,
+      dir: executionWorkspace,
       prompt: input.task,
       attachments: input.attachments,
       resumeExisting: input.resumeExisting,
@@ -136,13 +152,13 @@ async function run(
       model: input.model,
       agent: input.agent,
       binary: input.binary,
-      attach: connection.base,
+      attach: 'endpoint' in connection ? connection.endpoint : connection.base,
       maxIterations: input.maxIterations,
       stallTimeoutMin: input.stallMinutes,
       turnHardTimeoutMin: Math.max(input.stallMinutes, Math.ceil(input.maxHours * 60)),
       sentinel: input.sentinel,
       noTodos: !input.todoDetection,
-      autoApprove: input.autoApprove,
+      autoApprove: input.autoApprove && !isDesktopSession,
       keepServer: false,
       exclusiveServer: false,
     }, {
@@ -179,7 +195,7 @@ async function run(
       beforeFirstPrompt: () => assertAttachmentMetadata(input.attachments),
       abortRemoteOnSignal: !input.resumeExisting,
     });
-    void catalog.reconcile().catch(() => undefined);
+    void (isDesktopSession ? desktopCatalog.reconcile() : catalog.reconcile()).catch(() => undefined);
     emit(context, {
       type: 'progress',
       iteration: result.state.iterations,
@@ -222,22 +238,32 @@ async function run(
 
 export function createOpenCodeEngineAdapter(): DesktopEngineAdapter {
   let sessionListener: ((sessions: OpenCodeSessionSummary[]) => void) | null = null;
+  let catalogMode: 'desktop' | 'server' = 'desktop';
   const catalog = new OpenCodeSessionCatalog((level, message) => {
     if (level === 'warn') process.stderr.write(`${message}\n`);
   });
+  const desktopCatalog = new OpenCodeDesktopBridgeCatalog((level, message) => {
+    if (level === 'warn') process.stderr.write(`${message}\n`);
+  });
   catalog.setListener((sessions) => {
-    sessionListener?.(sessions);
+    if (catalogMode === 'server') sessionListener?.(sessions);
+  });
+  desktopCatalog.setListener((sessions) => {
+    if (catalogMode === 'desktop') sessionListener?.(sessions);
   });
   return {
     doctor,
-    run: (input, context) => run(input, context, catalog),
+    run: (input, context) => run(input, context, catalog, desktopCatalog),
     async listSessions(input, listener) {
       sessionListener = listener;
-      return (await catalog.connect(input)).sessions;
+      catalogMode = input.attach === null ? 'desktop' : 'server';
+      return catalogMode === 'desktop'
+        ? (await desktopCatalog.connect(input)).sessions
+        : (await catalog.connect(input)).sessions;
     },
     async shutdown() {
       sessionListener = null;
-      await catalog.close();
+      await Promise.all([catalog.close(), desktopCatalog.close()]);
     },
   };
 }

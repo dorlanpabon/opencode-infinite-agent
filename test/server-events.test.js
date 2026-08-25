@@ -98,6 +98,7 @@ test('request enruta el workspace como el SDK oficial', async () => {
     });
   };
   const directory = 'D:\\proyectos\\área segura';
+  const transportedDirectory = 'D:/proyectos/área segura';
   await request('http://127.0.0.1:4096', 'GET', '/session/status?limit=1', null, {
     directory, fetchImpl,
   });
@@ -106,12 +107,12 @@ test('request enruta el workspace como el SDK oficial', async () => {
   });
 
   const getUrl = new URL(calls[0].url);
-  assert.equal(getUrl.searchParams.get('directory'), directory);
+  assert.equal(getUrl.searchParams.get('directory'), transportedDirectory);
   assert.equal(getUrl.searchParams.get('limit'), '1');
   assert.equal(calls[0].options.headers['x-opencode-directory'], undefined);
   const postUrl = new URL(calls[1].url);
   assert.equal(postUrl.searchParams.has('directory'), false);
-  assert.equal(calls[1].options.headers['x-opencode-directory'], encodeURIComponent(directory));
+  assert.equal(calls[1].options.headers['x-opencode-directory'], encodeURIComponent(transportedDirectory));
 });
 
 test('SSE vence una conexion muda, cancela el lector y reconecta con workspace', async () => {
@@ -132,7 +133,7 @@ test('SSE vence una conexion muda, cancela el lector y reconecta con workspace',
   await waitFor(() => calls.length >= 2, 300);
   assert.ok(cancels >= 1);
   assert.equal(calls[0].signal.aborted, true);
-  assert.equal(new URL(calls[0].url).searchParams.get('directory'), 'D:\\workspace con espacio');
+  assert.equal(new URL(calls[0].url).searchParams.get('directory'), 'D:/workspace con espacio');
   stream.abort();
   await stream.done;
 });

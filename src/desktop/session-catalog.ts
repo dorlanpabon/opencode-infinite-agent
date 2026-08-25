@@ -75,7 +75,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function connectionKey(input: SessionConnectionInput): string {
   const workspace = path.resolve(input.workspace);
   const normalized = process.platform === 'win32' ? workspace.toLowerCase() : workspace;
-  return JSON.stringify([normalized, input.binary, input.attach]);
+  return JSON.stringify([normalized, input.binary, input.attach, input.sessionRef]);
 }
 
 function timestamp(value: unknown): string {

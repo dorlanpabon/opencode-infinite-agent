@@ -1,0 +1,331 @@
+// opencode-infinite-agent:desktop-bridge
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const BRIDGE_VERSION = 3;
+const BRIDGE_BUILD_ID = createHash('sha256').update(readFileSync(fileURLToPath(import.meta.url))).digest('hex');
+const GLOBAL_SESSION_PAGE_SIZE = 100;
+const MAX_GLOBAL_SESSION_PAGES = 50;
+const MAX_BODY_BYTES = 64 * 1024 * 1024;
+const SESSION_ID = /^ses_[A-Za-z0-9]+$/u;
+const REGISTRY_STATE = Symbol.for('opencode-infinite-agent.desktop-bridge.registry');
+const registryState = globalThis[REGISTRY_STATE] ??= { cleanupRegistered: false, files: new Set() };
+let globalCatalogAvailable;
+
+function trackRegistryFile(file) {
+  registryState.files.add(file);
+  if (registryState.cleanupRegistered) return;
+  registryState.cleanupRegistered = true;
+  process.once('exit', () => {
+    for (const target of registryState.files) rmSync(target, { force: true });
+    registryState.files.clear();
+  });
+}
+
+function writeSse(target, payload) {
+  try {
+    if (target.write(payload)) return true;
+  } catch {}
+  target.destroy();
+  return false;
+}
+
+function bridgeDirectory() {
+  const configured = process.env.OPENCODE_INFINITE_STATE_DIR;
+  if (configured && path.isAbsolute(configured)) return path.join(configured, 'bridges');
+  return path.join(os.homedir(), '.opencode-infinite', 'bridges');
+}
+
+function json(response, status, value) {
+  const body = JSON.stringify(value);
+  response.writeHead(status, {
+    'cache-control': 'no-store',
+    'content-length': Buffer.byteLength(body),
+    'content-type': 'application/json; charset=utf-8',
+    'x-content-type-options': 'nosniff',
+  });
+  response.end(body);
+}
+
+function authorized(request, token) {
+  const header = request.headers.authorization;
+  if (typeof header !== 'string' || !header.startsWith('Bearer ')) return false;
+  const candidate = Buffer.from(header.slice(7));
+  const expected = Buffer.from(token);
+  return candidate.length === expected.length && timingSafeEqual(candidate, expected);
+}
+
+async function bodyOf(request) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += bytes.length;
+    if (size > MAX_BODY_BYTES) {
+      const error = new Error('El cuerpo excede el límite seguro del puente.');
+      error.status = 413;
+      throw error;
+    }
+    chunks.push(bytes);
+  }
+  if (size === 0) return {};
+  try {
+    return JSON.parse(Buffer.concat(chunks, size).toString('utf8'));
+  } catch {
+    const error = new Error('JSON inválido.');
+    error.status = 400;
+    throw error;
+  }
+}
+
+async function sdkData(promise) {
+  const result = await promise;
+  if (result && result.error !== undefined) {
+    const error = new Error('OpenCode rechazó la solicitud del puente.');
+    error.status = Number(result.response?.status) || 502;
+    error.detail = result.error;
+    throw error;
+  }
+  return result?.data;
+}
+
+async function globalSessions(client) {
+  const projectSessions = () => sdkData(client.session.list({ query: { roots: true } }));
+  if (globalCatalogAvailable === false) return (await projectSessions()) ?? [];
+  const transport = client?._client;
+  if (!transport || typeof transport.get !== 'function') {
+    globalCatalogAvailable = false;
+    return (await projectSessions()) ?? [];
+  }
+  const sessions = [];
+  const cursors = new Set();
+  let cursor;
+  for (let page = 0; page < MAX_GLOBAL_SESSION_PAGES; page += 1) {
+    const result = await transport.get({
+      url: '/experimental/session',
+      query: {
+        roots: true,
+        limit: GLOBAL_SESSION_PAGE_SIZE,
+        ...(cursor === undefined ? {} : { cursor }),
+      },
+    });
+    if (result?.error !== undefined) {
+      const status = Number(result.response?.status) || 502;
+      if (page === 0 && (status === 404 || status === 405)) {
+        globalCatalogAvailable = false;
+        return (await projectSessions()) ?? [];
+      }
+      const error = new Error('OpenCode interrumpió el catálogo global de sesiones.');
+      error.status = status;
+      throw error;
+    }
+    globalCatalogAvailable = true;
+    if (!Array.isArray(result?.data)) break;
+    sessions.push(...result.data);
+    const header = result.response?.headers?.get?.('x-next-cursor');
+    const next = Number(header);
+    if (!header || !Number.isFinite(next) || cursors.has(next)) break;
+    cursors.add(next);
+    cursor = next;
+  }
+  return sessions;
+}
+
+function requestDirectory(url, request, fallback) {
+  const query = url.searchParams.get('directory');
+  const header = request.headers['x-opencode-directory'];
+  for (const candidate of [query, typeof header === 'string' ? decodeURIComponent(header) : null]) {
+    if (candidate && path.isAbsolute(candidate)) return candidate;
+  }
+  return fallback;
+}
+
+function sessionRoute(pathname) {
+  const match = /^\/session\/(ses_[A-Za-z0-9]+)(?:\/(message|todo|prompt_async|abort))?$/u.exec(pathname);
+  if (!match || !SESSION_ID.test(match[1])) return null;
+  return { id: match[1], action: match[2] ?? 'get' };
+}
+
+export const OpenCodeInfiniteBridge = async ({ client, directory, project, worktree }) => {
+  const bridgeId = randomBytes(16).toString('hex');
+  const token = randomBytes(32).toString('hex');
+  const eventClients = new Set();
+  const sockets = new Set();
+  let registryFile = null;
+  let disposed = false;
+
+  const server = createServer(async (request, response) => {
+    try {
+      if (!authorized(request, token)) {
+        response.setHeader('www-authenticate', 'Bearer');
+        json(response, 401, { error: 'No autorizado.' });
+        return;
+      }
+
+      const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+      const scopedDirectory = requestDirectory(url, request, directory);
+
+      if (request.method === 'GET' && url.pathname === '/global/health') {
+        json(response, 200, {
+          healthy: true,
+          version: `desktop-bridge-${BRIDGE_VERSION}`,
+          buildId: BRIDGE_BUILD_ID,
+          bridgeId,
+          projectID: project.id,
+          directory,
+          worktree,
+          pid: process.pid,
+        });
+        return;
+      }
+
+      if (request.method === 'GET' && url.pathname === '/event') {
+        response.writeHead(200, {
+          'cache-control': 'no-cache, no-store',
+          connection: 'keep-alive',
+          'content-type': 'text/event-stream; charset=utf-8',
+          'x-accel-buffering': 'no',
+        });
+        if (!writeSse(response, `data: ${JSON.stringify({ type: 'server.connected', properties: {} })}\n\n`)) return;
+        eventClients.add(response);
+        const heartbeat = setInterval(() => {
+          if (!writeSse(response, ': heartbeat\n\n')) eventClients.delete(response);
+        }, 15_000);
+        request.once('close', () => {
+          clearInterval(heartbeat);
+          eventClients.delete(response);
+        });
+        return;
+      }
+
+      if (request.method === 'GET' && url.pathname === '/session') {
+        const data = await globalSessions(client);
+        json(response, 200, data ?? []);
+        return;
+      }
+
+      if (request.method === 'GET' && url.pathname === '/session/status') {
+        const data = await sdkData(client.session.status({ query: { directory: scopedDirectory } }));
+        json(response, 200, data ?? {});
+        return;
+      }
+
+      const route = sessionRoute(url.pathname);
+      if (route && request.method === 'GET' && route.action === 'get') {
+        const data = await sdkData(client.session.get({
+          path: { id: route.id },
+          query: { directory: scopedDirectory },
+        }));
+        json(response, 200, data);
+        return;
+      }
+
+      if (route && request.method === 'GET' && route.action === 'message') {
+        const data = await sdkData(client.session.messages({
+          path: { id: route.id },
+          query: { directory: scopedDirectory },
+        }));
+        json(response, 200, data ?? []);
+        return;
+      }
+
+      if (route && request.method === 'GET' && route.action === 'todo') {
+        const data = await sdkData(client.session.todo({
+          path: { id: route.id },
+          query: { directory: scopedDirectory },
+        }));
+        json(response, 200, data ?? []);
+        return;
+      }
+
+      if (route && request.method === 'POST' && route.action === 'prompt_async') {
+        const body = await bodyOf(request);
+        await sdkData(client.session.promptAsync({
+          path: { id: route.id },
+          query: { directory: scopedDirectory },
+          body,
+        }));
+        response.writeHead(204, { 'cache-control': 'no-store' });
+        response.end();
+        return;
+      }
+
+      if (route && request.method === 'POST' && route.action === 'abort') {
+        const data = await sdkData(client.session.abort({
+          path: { id: route.id },
+          query: { directory: scopedDirectory },
+        }));
+        json(response, 200, data ?? true);
+        return;
+      }
+
+      json(response, 404, { error: 'Ruta no permitida.' });
+    } catch (error) {
+      const status = Number(error?.status);
+      json(response, Number.isInteger(status) && status >= 400 && status <= 599 ? status : 500, {
+        error: error instanceof Error ? error.message : 'Error del puente.',
+      });
+    }
+  });
+  server.on('connection', (socket) => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+  });
+
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen({ host: '127.0.0.1', port: 0 }, resolve);
+  });
+  server.unref();
+
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('No se pudo abrir el puente local.');
+  const root = bridgeDirectory();
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  const projectKey = createHash('sha256').update(`${project.id}\0${directory}`).digest('hex').slice(0, 16);
+  registryFile = path.join(root, `${process.pid}-${projectKey}-${bridgeId}.json`);
+  const temporary = `${registryFile}.${randomBytes(4).toString('hex')}.tmp`;
+  writeFileSync(temporary, JSON.stringify({
+    schemaVersion: 1,
+    bridgeVersion: BRIDGE_VERSION,
+    buildId: BRIDGE_BUILD_ID,
+    bridgeId,
+    endpoint: `http://127.0.0.1:${address.port}`,
+    token,
+    pid: process.pid,
+    projectID: project.id,
+    directory,
+    worktree,
+    startedAt: new Date().toISOString(),
+  }), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  renameSync(temporary, registryFile);
+  trackRegistryFile(registryFile);
+
+  return {
+    dispose: async () => {
+      if (disposed) return;
+      disposed = true;
+      for (const target of eventClients) target.destroy();
+      eventClients.clear();
+      for (const socket of sockets) socket.destroy();
+      sockets.clear();
+      if (registryFile) {
+        rmSync(registryFile, { force: true });
+        registryState.files.delete(registryFile);
+        registryFile = null;
+      }
+      await new Promise((resolve) => server.close(() => resolve()));
+    },
+    event: async ({ event }) => {
+      if (disposed) return;
+      const payload = `data: ${JSON.stringify(event)}\n\n`;
+      for (const target of [...eventClients]) {
+        if (!writeSse(target, payload)) eventClients.delete(target);
+      }
+    },
+  };
+};
