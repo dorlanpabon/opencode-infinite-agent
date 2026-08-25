@@ -38,12 +38,37 @@ try {
   const toggle = window.locator(`input[data-session-id="${sessionId}"]`);
   await toggle.waitFor({ state: 'attached', timeout: 30_000 });
   assert.equal(await toggle.isDisabled(), false);
+  const sessionItem = window.locator('.session-item').filter({ has: toggle });
+  const openProjectButton = sessionItem.getByRole('button', { name: 'Abrir proyecto en OpenCode' });
+  const copyLinkButton = sessionItem.getByRole('button', { name: 'Copiar enlace interno' });
+  assert.equal(await openProjectButton.isVisible(), true);
+  assert.equal(await copyLinkButton.isVisible(), true);
+  await copyLinkButton.click();
+  await window.locator('.toast').filter({ hasText: 'Enlace interno copiado.' }).waitFor({ state: 'visible' });
+  const outputDirectory = path.join(root, 'out', 'qa');
+  await mkdir(outputDirectory, { recursive: true });
+  const catalogScreenshot = path.join(outputDirectory, `desktop-session-actions-${sessionId}.png`);
+  await window.screenshot({ path: catalogScreenshot });
+  await window.setViewportSize({ width: 940, height: 640 });
+  const minimumFit = await window.evaluate((targetSessionId) => {
+    const viewport = { width: innerWidth, height: innerHeight };
+    const controls = [...document.querySelectorAll(`[data-session-focus-fallback="${targetSessionId}"] .session-action`)]
+      .map((element) => element.getBoundingClientRect())
+      .every((rect) => rect.left >= 0 && rect.top >= 0 && rect.right <= viewport.width && rect.bottom <= viewport.height);
+    return {
+      canScrollX: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+      controls,
+    };
+  }, sessionId);
+  assert.deepEqual(minimumFit, { canScrollX: false, controls: true });
+  const minimumScreenshot = path.join(outputDirectory, `desktop-session-actions-minimum-${sessionId}.png`);
+  await window.screenshot({ path: minimumScreenshot });
   await window.locator(`input[data-session-id="${sessionId}"] + .session-switch-track`).click();
   assert.equal(await window.locator('#run-dialog').evaluate((dialog) => dialog.open), true);
   assert.equal(await window.locator('#dialog-title').innerText(), 'Coloca el objetivo para activar');
   assert.equal(await window.locator('#session-input').inputValue(), sessionId);
   assert.equal(await window.locator('#task-input').inputValue(), '');
-  assert.match((await window.locator('#workspace-input').inputValue()).replaceAll('\\', '/'), /\/moodle_typescript$/u);
+  assert.equal(path.resolve(await window.locator('#workspace-input').inputValue()), path.resolve(input.workspace));
   assert.equal(await window.locator('#auto-approve-input').isDisabled(), true);
   assert.match(await window.locator('#auto-approve-detail').innerText(), /directamente en OpenCode Desktop/iu);
   assert.equal(await window.locator('#task-input').evaluate((element) => element === document.activeElement), true);
@@ -56,11 +81,9 @@ try {
     })(),
   }));
   assert.deepEqual(fit, { canScrollX: false, dialog: true });
-  const outputDirectory = path.join(root, 'out', 'qa');
-  await mkdir(outputDirectory, { recursive: true });
   const screenshot = path.join(outputDirectory, `desktop-session-${sessionId}.png`);
   await window.screenshot({ path: screenshot });
-  process.stdout.write(`${JSON.stringify({ sessionId, screenshot, workspace: await window.locator('#workspace-input').inputValue() })}\n`);
+  process.stdout.write(`${JSON.stringify({ catalogScreenshot, minimumScreenshot, sessionId, screenshot, workspace: await window.locator('#workspace-input').inputValue() })}\n`);
 } finally {
   await browser?.close().catch(() => undefined);
   await stop(desktop);

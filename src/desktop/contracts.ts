@@ -49,6 +49,14 @@ export interface SessionConnectionInput {
   sessionRef: string | null;
 }
 
+export interface OpenProjectInput {
+  workspace: string;
+}
+
+export interface CopySessionLinkInput {
+  sessionId: string;
+}
+
 export type OpenCodeSessionStatus = 'idle' | 'busy' | 'retry';
 
 export interface OpenCodeSessionSummary {
@@ -148,6 +156,8 @@ export interface DesktopApi {
   listRuns(): Promise<RunState[]>;
   getRun(runId: string): Promise<RunState>;
   listSessions(input: SessionConnectionInput): Promise<OpenCodeSessionSummary[]>;
+  openOpenCodeProject(workspace: string): Promise<void>;
+  copyOpenCodeSessionLink(sessionId: string): Promise<void>;
   setContinuous(input: SetContinuousInput): Promise<OperationReceipt>;
   startRun(input: StartRunInput): Promise<OperationReceipt>;
   stopRun(runId: string): Promise<OperationReceipt>;
@@ -325,6 +335,21 @@ export function parseSessionId(value: unknown): string {
     throw new TypeError('Session ID inválido.');
   }
   return value;
+}
+
+export function parseOpenProjectInput(value: unknown): OpenProjectInput {
+  if (!isRecord(value) || !hasExactKeys(value, ['workspace'])
+    || typeof value.workspace !== 'string' || value.workspace.length === 0 || value.workspace.length > 32_767) {
+    throw new TypeError('Parámetros para abrir el proyecto inválidos.');
+  }
+  return { workspace: value.workspace };
+}
+
+export function parseCopySessionLinkInput(value: unknown): CopySessionLinkInput {
+  if (!isRecord(value) || !hasExactKeys(value, ['sessionId'])) {
+    throw new TypeError('Parámetros para copiar el enlace inválidos.');
+  }
+  return { sessionId: parseSessionId(value.sessionId) };
 }
 
 export function parseSetContinuousInput(value: unknown): SetContinuousInput {

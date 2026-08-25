@@ -2,6 +2,8 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const {
   parseDoctorInput,
+  parseCopySessionLinkInput,
+  parseOpenProjectInput,
   parseSessionConnectionInput,
   parseSetContinuousInput,
   parseStartRunInput,
@@ -69,6 +71,14 @@ test('contratos Desktop validan catálogo y modo continuo por sesión exacta', (
     () => parseSetContinuousInput({ enabled: false, sessionId: 'ses_exact123', run }),
     /no admite/iu,
   );
+});
+
+test('contratos Desktop aíslan las acciones de navegación por sesión', () => {
+  assert.deepEqual(parseOpenProjectInput({ workspace: 'C:\\workspace' }), { workspace: 'C:\\workspace' });
+  assert.deepEqual(parseCopySessionLinkInput({ sessionId: 'ses_exact123' }), { sessionId: 'ses_exact123' });
+  assert.throws(() => parseOpenProjectInput({ workspace: 'C:\\workspace', url: 'https://example.com' }), /inválidos/iu);
+  assert.throws(() => parseCopySessionLinkInput({ sessionId: 'ses_exact123', token: 'secret' }), /inválidos/iu);
+  assert.throws(() => parseCopySessionLinkInput({ sessionId: 'ses_bad/route' }), /Session ID/iu);
 });
 
 test('contratos Desktop rechazan campos extra, attach remoto y auto-approve sin confirmar', () => {

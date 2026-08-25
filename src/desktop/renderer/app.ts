@@ -119,6 +119,9 @@ const ui = {
   inspectModel: element<HTMLElement>('inspect-model'),
   inspectAgent: element<HTMLElement>('inspect-agent'),
   inspectLimit: element<HTMLElement>('inspect-limit'),
+  inspectSessionActions: element<HTMLElement>('inspect-session-actions'),
+  inspectOpenProjectButton: element<HTMLButtonElement>('inspect-open-project-button'),
+  inspectCopySessionLinkButton: element<HTMLButtonElement>('inspect-copy-session-link-button'),
   clearLogsButton: element<HTMLButtonElement>('clear-logs-button'),
   logList: element<HTMLOListElement>('log-list'),
   logsEmpty: element<HTMLElement>('logs-empty'),
@@ -344,6 +347,47 @@ function sessionStatusLabel(session: OpenCodeSessionSummary): string {
   return 'En espera';
 }
 
+function exactRunSessionId(run: RunState): string | null {
+  if (run.sessionId && /^ses_[A-Za-z0-9]+$/u.test(run.sessionId)) return run.sessionId;
+  if (run.sessionRef && /^ses_[A-Za-z0-9]+$/u.test(run.sessionRef)) return run.sessionRef;
+  const match = run.sessionRef?.match(/^oc:\/\/renderer\/server\/[A-Za-z0-9]+\/session\/(ses_[A-Za-z0-9]+)$/u);
+  return match?.[1] ?? null;
+}
+
+async function openProjectInOpenCode(workspace: string, button: HTMLButtonElement): Promise<void> {
+  button.disabled = true;
+  try {
+    await api.openOpenCodeProject(workspace);
+    appendLog('info', `Proyecto abierto en OpenCode: ${workspace}`);
+    toast('Proyecto abierto en OpenCode Desktop.');
+    announce('Proyecto abierto en OpenCode Desktop.');
+  } catch (error) {
+    const message = errorText(error);
+    appendLog('error', `Abrir proyecto: ${message}`);
+    toast(message, true);
+    announce('No se pudo abrir el proyecto en OpenCode Desktop.');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function copyInternalSessionLink(sessionId: string, button: HTMLButtonElement): Promise<void> {
+  button.disabled = true;
+  try {
+    await api.copyOpenCodeSessionLink(sessionId);
+    appendLog('info', `Enlace interno copiado para ${sessionId}.`);
+    toast('Enlace interno copiado.');
+    announce('Enlace interno de sesión copiado.');
+  } catch (error) {
+    const message = errorText(error);
+    appendLog('error', `Copiar enlace interno: ${message}`);
+    toast(message, true);
+    announce('No se pudo copiar el enlace interno de la sesión.');
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function renderSessionList(): void {
   const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const focusedSessionId = activeElement?.dataset.sessionId
@@ -367,7 +411,20 @@ function renderSessionList(): void {
     title.title = session.title;
     const meta = document.createElement('small');
     meta.textContent = `${sessionStatusLabel(session)} · ${formatRelative(session.updatedAt)}`;
-    content.append(title, meta);
+    const actions = document.createElement('span');
+    actions.className = 'session-actions';
+    const openProject = document.createElement('button');
+    openProject.type = 'button';
+    openProject.className = 'session-action';
+    openProject.textContent = 'Abrir proyecto en OpenCode';
+    openProject.addEventListener('click', () => { void openProjectInOpenCode(session.workspace, openProject); });
+    const copyLink = document.createElement('button');
+    copyLink.type = 'button';
+    copyLink.className = 'session-action';
+    copyLink.textContent = 'Copiar enlace interno';
+    copyLink.addEventListener('click', () => { void copyInternalSessionLink(session.id, copyLink); });
+    actions.append(openProject, copyLink);
+    content.append(title, meta, actions);
 
     const label = document.createElement('label');
     label.className = 'session-switch';
@@ -503,6 +560,7 @@ function renderSelectedRun(): void {
     ui.inspectModel.textContent = 'Predeterminado';
     ui.inspectAgent.textContent = 'Predeterminado';
     ui.inspectLimit.textContent = '—';
+    ui.inspectSessionActions.hidden = true;
     return;
   }
 
@@ -546,6 +604,11 @@ function renderSelectedRun(): void {
   ui.inspectModel.textContent = run.model ?? 'Predeterminado';
   ui.inspectAgent.textContent = run.agent ?? 'Predeterminado';
   ui.inspectLimit.textContent = `${run.maxIterations} iter. · ${run.maxHours} h · ${run.stallMinutes} min inactividad`;
+  ui.inspectSessionActions.hidden = false;
+  ui.inspectOpenProjectButton.disabled = false;
+  const sessionId = exactRunSessionId(run);
+  ui.inspectCopySessionLinkButton.disabled = sessionId === null;
+  ui.inspectCopySessionLinkButton.title = sessionId === null ? 'La sesión todavía no está disponible.' : '';
 }
 
 function render(): void {
@@ -1012,6 +1075,15 @@ function wireEvents(): () => void {
   ui.inspectorDoctorButton.addEventListener('click', () => { void runDoctor(); });
   ui.dialogDoctorButton.addEventListener('click', () => { void runDoctor(); });
   ui.stopRunButton.addEventListener('click', () => { void stopSelectedRun(); });
+  ui.inspectOpenProjectButton.addEventListener('click', () => {
+    const run = selectedRun();
+    if (run) void openProjectInOpenCode(run.workspace, ui.inspectOpenProjectButton);
+  });
+  ui.inspectCopySessionLinkButton.addEventListener('click', () => {
+    const run = selectedRun();
+    const sessionId = run ? exactRunSessionId(run) : null;
+    if (sessionId) void copyInternalSessionLink(sessionId, ui.inspectCopySessionLinkButton);
+  });
   ui.clearLogsButton.addEventListener('click', () => {
     logs = [];
     renderLogs();

@@ -3,16 +3,20 @@ import path from 'node:path';
 import {
   app,
   BrowserWindow,
+  clipboard,
   dialog,
   ipcMain,
   Menu,
   protocol,
   session,
+  shell,
   type IpcMainInvokeEvent,
 } from 'electron';
 import {
   DESKTOP_ORIGIN,
   parseDoctorInput,
+  parseCopySessionLinkInput,
+  parseOpenProjectInput,
   parseRunId,
   parseSessionConnectionInput,
   parseSetContinuousInput,
@@ -23,6 +27,7 @@ import {
   type SessionConnectionInput,
   type StartRunInput,
 } from './contracts.js';
+import { buildOpenCodeInternalSessionLink, buildOpenCodeProjectUrl } from './session-links.js';
 import { assertAttachmentMetadata, inspectAttachments, parseDroppedPaths } from './attachments.js';
 import { createOpenCodeEngineAdapter } from './engine-adapter.js';
 import {
@@ -41,6 +46,8 @@ const CHANNELS = {
   listRuns: 'runs:list',
   getRun: 'runs:get',
   listSessions: 'sessions:list',
+  openOpenCodeProject: 'sessions:open-project',
+  copyOpenCodeSessionLink: 'sessions:copy-internal-link',
   setContinuous: 'sessions:set-continuous',
   startRun: 'runs:start',
   stopRun: 'runs:stop',
@@ -232,6 +239,18 @@ function registerHandlers(): void {
     const input = parseSessionConnectionInput(raw);
     await assertConnectionPaths(input);
     return manager().listSessions(input);
+  });
+  ipcMain.handle(CHANNELS.openOpenCodeProject, async (event, raw: unknown) => {
+    assertTrustedSender(event);
+    const input = parseOpenProjectInput(raw);
+    assertAbsolutePath(input.workspace, 'El workspace');
+    if (!await isDirectory(input.workspace)) throw new TypeError('El workspace no existe o no es un directorio.');
+    await shell.openExternal(buildOpenCodeProjectUrl(input.workspace));
+  });
+  ipcMain.handle(CHANNELS.copyOpenCodeSessionLink, (event, raw: unknown) => {
+    assertTrustedSender(event);
+    const input = parseCopySessionLinkInput(raw);
+    clipboard.writeText(buildOpenCodeInternalSessionLink(input.sessionId));
   });
   ipcMain.handle(CHANNELS.setContinuous, async (event, raw: unknown) => {
     assertTrustedSender(event);
