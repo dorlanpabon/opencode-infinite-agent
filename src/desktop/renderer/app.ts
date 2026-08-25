@@ -161,8 +161,9 @@ const ui = {
   advancedSettings: element<HTMLDetailsElement>('advanced-settings'),
   sessionInput: element<HTMLInputElement>('session-input'),
   attachInput: element<HTMLInputElement>('attach-input'),
+  modelCombobox: element<HTMLElement>('model-combobox'),
   modelInput: element<HTMLInputElement>('model-input'),
-  modelOptions: element<HTMLDataListElement>('model-options'),
+  modelOptions: element<HTMLUListElement>('model-options'),
   modelRefreshButton: element<HTMLButtonElement>('model-refresh-button'),
   modelStatus: element<HTMLElement>('model-status'),
   agentInput: element<HTMLInputElement>('agent-input'),
@@ -191,6 +192,8 @@ let doctorResult: DoctorResult | null = null;
 let sessionConnection: SessionConnectionInput | null = null;
 let modelCatalog: OpenCodeModelCatalog | null = null;
 let modelCatalogKey: string | null = null;
+let activeModelOptionId: string | null = null;
+let modelFilterQuery: string | null = null;
 let modelRequestId = 0;
 let sessionRequestId = 0;
 let contextRequestId = 0;
@@ -939,16 +942,111 @@ function connectionModelKey(input: SessionConnectionInput): string {
   return JSON.stringify([input.workspace, input.binary, input.attach]);
 }
 
-function renderModelCatalog(catalog: OpenCodeModelCatalog): void {
-  const previous = ui.modelInput.value;
+function filteredModels(): OpenCodeModelCatalog['models'] {
+  const query = modelFilterQuery?.trim().toLocaleLowerCase() ?? '';
+  if (!query) return modelCatalog?.models ?? [];
+  return (modelCatalog?.models ?? []).filter((model) => (
+    `${model.id} ${model.name} ${model.providerId} ${model.providerName}`.toLocaleLowerCase().includes(query)
+  ));
+}
+
+function renderModelOptions(open: boolean): void {
+  if (!open || !modelCatalog) {
+    ui.modelOptions.replaceChildren();
+    ui.modelOptions.hidden = true;
+    ui.modelInput.setAttribute('aria-expanded', 'false');
+    ui.modelInput.removeAttribute('aria-activedescendant');
+    return;
+  }
+  const models = filteredModels();
+  if (activeModelOptionId && !models.some((model) => model.id === activeModelOptionId)) {
+    activeModelOptionId = null;
+  }
   const fragment = document.createDocumentFragment();
-  for (const model of catalog.models) {
-    const option = document.createElement('option');
-    option.value = model.id;
-    option.label = `${model.name} · ${model.providerName}${model.providerDefault ? ' · Predeterminado del proveedor' : ''}`;
+  for (const [index, model] of models.entries()) {
+    const option = document.createElement('li');
+    const optionId = `model-option-${index}`;
+    option.id = optionId;
+    option.className = 'model-option';
+    option.dataset.modelId = model.id;
+    option.setAttribute('role', 'option');
+    option.setAttribute('aria-selected', String(model.id === ui.modelInput.value));
+    option.classList.toggle('is-active', model.id === activeModelOptionId);
+
+    const id = document.createElement('span');
+    id.className = 'model-option-id';
+    id.textContent = model.id;
+    const meta = document.createElement('span');
+    meta.className = 'model-option-meta';
+    meta.textContent = `${model.name} · ${model.providerName}${model.providerDefault ? ' · Predeterminado del proveedor' : ''}`;
+    option.append(id, meta);
     fragment.append(option);
   }
+  if (models.length === 0 && modelCatalog) {
+    const empty = document.createElement('li');
+    empty.className = 'model-options-empty';
+    empty.setAttribute('role', 'presentation');
+    empty.textContent = 'Sin coincidencias. Puedes escribir proveedor/modelo manualmente.';
+    fragment.append(empty);
+  }
   ui.modelOptions.replaceChildren(fragment);
+  ui.modelOptions.hidden = false;
+  ui.modelInput.setAttribute('aria-expanded', 'true');
+  const active = activeModelOptionId
+    ? models.findIndex((model) => model.id === activeModelOptionId)
+    : -1;
+  if (active >= 0) {
+    const optionId = `model-option-${active}`;
+    ui.modelInput.setAttribute('aria-activedescendant', optionId);
+    document.getElementById(optionId)?.scrollIntoView({ block: 'nearest' });
+  } else {
+    ui.modelInput.removeAttribute('aria-activedescendant');
+  }
+}
+
+function openModelOptions(): void {
+  if (!modelCatalog) return;
+  const selected = modelCatalog.models.find((model) => model.id === ui.modelInput.value);
+  modelFilterQuery = selected ? null : ui.modelInput.value;
+  const models = filteredModels();
+  if (!activeModelOptionId) {
+    activeModelOptionId = selected?.id ?? null;
+  }
+  renderModelOptions(true);
+}
+
+function closeModelOptions(): void {
+  activeModelOptionId = null;
+  modelFilterQuery = null;
+  renderModelOptions(false);
+}
+
+function moveActiveModelOption(direction: 1 | -1): void {
+  const models = filteredModels();
+  if (models.length === 0) {
+    openModelOptions();
+    return;
+  }
+  const current = models.findIndex((model) => model.id === activeModelOptionId);
+  const next = current < 0
+    ? direction === 1 ? 0 : models.length - 1
+    : (current + direction + models.length) % models.length;
+  activeModelOptionId = models[next]?.id ?? null;
+  renderModelOptions(true);
+}
+
+function selectModelOption(modelId: string): void {
+  const model = modelCatalog?.models.find((candidate) => candidate.id === modelId);
+  if (!model) return;
+  ui.modelInput.value = model.id;
+  ui.modelInput.focus({ preventScroll: true });
+  closeModelOptions();
+  announce(`${model.name} seleccionado.`);
+}
+
+function renderModelCatalog(catalog: OpenCodeModelCatalog): void {
+  const previous = ui.modelInput.value;
+  modelCatalog = catalog;
   const configured = catalog.configuredModel;
   const configuredAvailable = configured !== null && catalog.models.some((model) => model.id === configured);
   if (previous) {
@@ -956,6 +1054,7 @@ function renderModelCatalog(catalog: OpenCodeModelCatalog): void {
   } else if (dialogMode === 'new' && configuredAvailable) {
     ui.modelInput.value = configured;
   }
+  renderModelOptions(false);
   const providerCount = new Set(catalog.models.map((model) => model.providerId)).size;
   const scope = `${catalog.models.length} modelos de ${providerCount} proveedores`;
   if (dialogMode === 'activate') {
@@ -1019,6 +1118,7 @@ function openRunDialog(target: OpenCodeSessionSummary | null = null): void {
   dialogMode = target ? 'activate' : 'new';
   activationTarget = target;
   ui.form.reset();
+  closeModelOptions();
   selectedAttachments = [];
   renderAttachments();
   applyDialogConnection();
@@ -1057,6 +1157,7 @@ function openConnectionDialog(): void {
   dialogMode = 'connect';
   activationTarget = null;
   ui.form.reset();
+  closeModelOptions();
   applyDialogConnection();
   ui.taskInput.value = 'Conectar catálogo de sesiones';
   ui.taskField.hidden = true;
@@ -1075,6 +1176,7 @@ function openConnectionDialog(): void {
 }
 
 function closeRunDialog(): void {
+  closeModelOptions();
   if (ui.runDialog.open) ui.runDialog.close();
 }
 
@@ -1432,6 +1534,51 @@ function wireEvents(): () => void {
     modelCatalogKey = null;
     void loadModels(modelConnectionInput(), true);
   });
+  ui.modelInput.addEventListener('focus', openModelOptions);
+  ui.modelInput.addEventListener('click', openModelOptions);
+  ui.modelInput.addEventListener('input', () => {
+    activeModelOptionId = null;
+    modelFilterQuery = ui.modelInput.value;
+    renderModelOptions(true);
+  });
+  ui.modelInput.addEventListener('keydown', (event) => {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      moveActiveModelOption(event.key === 'ArrowDown' ? 1 : -1);
+      return;
+    }
+    if ((event.key === 'Home' || event.key === 'End') && !ui.modelOptions.hidden) {
+      const models = filteredModels();
+      activeModelOptionId = (event.key === 'Home' ? models[0] : models.at(-1))?.id ?? null;
+      event.preventDefault();
+      renderModelOptions(true);
+      return;
+    }
+    if (event.key === 'Enter' && !ui.modelOptions.hidden && activeModelOptionId) {
+      event.preventDefault();
+      selectModelOption(activeModelOptionId);
+      return;
+    }
+    if (event.key === 'Escape' && !ui.modelOptions.hidden) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeModelOptions();
+    } else if (event.key === 'Tab') {
+      closeModelOptions();
+    }
+  });
+  ui.modelOptions.addEventListener('pointerdown', (event) => {
+    if (event.pointerType === 'mouse') event.preventDefault();
+  });
+  ui.modelOptions.addEventListener('click', (event) => {
+    if (!(event.target instanceof Element)) return;
+    const option = event.target.closest<HTMLElement>('[data-model-id]');
+    if (option?.dataset.modelId) selectModelOption(option.dataset.modelId);
+  });
+  document.addEventListener('pointerdown', (event) => {
+    if (event.target instanceof Node && !ui.modelCombobox.contains(event.target)) closeModelOptions();
+  });
+  ui.runDialog.addEventListener('close', closeModelOptions);
   ui.workspaceInput.addEventListener('change', () => {
     modelCatalogKey = null;
     void loadModels(modelConnectionInput());

@@ -56,6 +56,45 @@ try {
   });
   assert.equal(dialogFit, true);
   await window.locator('#advanced-settings').evaluate((details) => { details.open = true; });
+  const modelListFit = await window.locator('#model-options').evaluate((list) => {
+    const fragment = document.createDocumentFragment();
+    for (let index = 0; index < 300; index += 1) {
+      const option = document.createElement('li');
+      option.className = 'model-option';
+      const id = document.createElement('span');
+      id.className = 'model-option-id';
+      id.textContent = `amazon-bedrock/global.anthropic.claude-opus-4-6-v1-${index}`;
+      const meta = document.createElement('span');
+      meta.className = 'model-option-meta';
+      meta.textContent = 'Claude Opus 4.6 · Amazon Bedrock';
+      option.append(id, meta);
+      fragment.append(option);
+    }
+    list.replaceChildren(fragment);
+    list.hidden = false;
+    const style = getComputedStyle(list);
+    const listRect = list.getBoundingClientRect();
+    const dialogRect = document.querySelector('#run-dialog').getBoundingClientRect();
+    const result = {
+      hasOwnScroll: list.scrollHeight > list.clientHeight,
+      hasHorizontalOverflow: list.scrollWidth > list.clientWidth,
+      overflowY: style.overflowY,
+      withinDialog: listRect.left >= dialogRect.left && listRect.right <= dialogRect.right,
+    };
+    return result;
+  });
+  assert.deepEqual(modelListFit, {
+    hasOwnScroll: true,
+    hasHorizontalOverflow: false,
+    overflowY: 'auto',
+    withinDialog: true,
+  });
+  await window.locator('#model-options').scrollIntoViewIfNeeded();
+  await window.screenshot({ path: path.join(qaDirectory, 'desktop-model-selector.png') });
+  await window.locator('#model-options').evaluate((list) => {
+    list.replaceChildren();
+    list.hidden = true;
+  });
   await window.locator('#auto-approve-input').check();
   assert.equal(await window.locator('#auto-approve-confirmation-row').isVisible(), true);
   assert.equal(await window.locator('#auto-approve-confirmation-input').isChecked(), false);
