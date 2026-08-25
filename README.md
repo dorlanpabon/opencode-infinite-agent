@@ -22,7 +22,7 @@ Los instaladores de cada versión están en [GitHub Releases](https://github.com
 | Debian/Ubuntu | x64 / ARM64 | `OpenCode-Infinite-*-linux-*.deb` |
 | Fedora/RHEL | x64 / ARM64 | `OpenCode-Infinite-*-linux-*.rpm` |
 
-La versión estable `2.4.0` se distribuye sin certificado comercial de Windows ni firma o notarización de Apple. SmartScreen o Gatekeeper pueden mostrar una advertencia. Comprueba siempre `SHA256SUMS.txt` antes de instalar.
+La versión estable `2.5.0` se distribuye sin certificado comercial de Windows ni firma o notarización de Apple. SmartScreen o Gatekeeper pueden mostrar una advertencia. Comprueba siempre `SHA256SUMS.txt` antes de instalar.
 
 Cada artefacto y `SHA256SUMS.txt` incluye procedencia firmada por GitHub/Sigstore. Puedes verificarla con `gh attestation verify <archivo> -R dorlanpabon/opencode-infinite-agent`; esto acredita el workflow y commit de origen, pero no reemplaza Authenticode ni la notarización de Apple.
 
@@ -40,9 +40,12 @@ La aplicación se integra con el proceso propietario de OpenCode Desktop mediant
 2. En **Sesiones**, pulsa **Conectar OpenCode Desktop**. La primera vez se instalará la integración local y se pedirá reiniciar OpenCode Desktop una sola vez.
 3. Puedes pegar un enlace interno exacto `oc://renderer/server/c2lkZWNhcg/session/ses_…` para localizar una sesión, incluso si pertenece a otro workspace.
 4. Activa **Continuar hasta terminar**, coloca el objetivo sin un límite artificial de caracteres y adjunta los archivos necesarios.
-5. Para una tarea nueva, usa **Nueva ejecución**, elige el workspace y pulsa **Iniciar supervisor**.
+5. En **Modelo**, busca entre los modelos que el servidor vivo expone para ese workspace. La interfaz identifica el predeterminado global configurado y los defaults de cada proveedor sin confundirlos.
+6. Para una tarea nueva, usa **Nueva ejecución**, elige el workspace y pulsa **Iniciar supervisor**.
 
 La interfaz muestra el ciclo del turno, estado del stream, sesión, iteración, consumo, historial y logs. Solo permite una ejecución activa por instancia y conserva el estado de forma atómica para recuperarse tras un cierre. Las tareas nuevas usan un servidor dedicado; las sesiones existentes continúan dentro del sidecar que realmente las posee.
+
+Si `config.model` está vacío, OpenCode Infinite lo indica como **sin predeterminado global** y deja la elección automática a OpenCode; no presenta como global ninguno de los defaults por proveedor. Elegir `proveedor/modelo` lo envía explícitamente en cada turno. En una sesión existente, dejar el campo vacío conserva la resolución nativa de OpenCode entre el agente y la sesión. Si el catálogo no carga, el objetivo no queda bloqueado: puedes escribir un ID completo manualmente y reintentar la consulta.
 
 OpenCode publica únicamente `opencode://open-project?directory=...` para abrir un workspace desde el sistema operativo; **Abrir proyecto en OpenCode** usa ese protocolo. El enlace `oc://renderer/server/c2lkZWNhcg/session/<ses_id>` pertenece al renderer interno de OpenCode Desktop: OpenCode Infinite permite copiarlo o pegarlo para identificar una sesión exacta, pero nunca intenta lanzarlo como protocolo del sistema operativo.
 
@@ -121,7 +124,7 @@ Las sesiones creadas antes de un *wrap* incompatible de IDs fallan de forma segu
 - El servidor administrado escucha solo en loopback.
 - Las credenciales Basic Auth nunca se envían a un host remoto.
 - Cada solicitud y el stream adjunto se enrutan al workspace exacto seleccionado.
-- Cada puente de OpenCode Desktop escucha en un puerto aleatorio de `127.0.0.1`, exige un token aleatorio y solo expone las operaciones necesarias del SDK propietario.
+- Cada puente de OpenCode Desktop escucha en un puerto aleatorio de `127.0.0.1`, exige un token aleatorio y solo expone las operaciones necesarias del SDK propietario. El catálogo de modelos devuelve únicamente IDs, nombres y defaults; nunca reenvía settings, headers ni credenciales de proveedor.
 - La autoaprobación de tareas nuevas filtra por el ID exacto de la sesión, reconcilia respuestas ambiguas y se cancela con la ejecución; no se intenta eludir el diálogo de permisos de OpenCode Desktop.
 - Desktop ignora binarios definidos por el workspace salvo que el usuario seleccione uno explícitamente.
 - Electron usa aislamiento de contexto, sandbox, CSP estricta, navegación bloqueada y un puente IPC mínimo con validación de entradas.

@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const BRIDGE_VERSION = 3;
+const BRIDGE_VERSION = 4;
 const BRIDGE_BUILD_ID = createHash('sha256').update(readFileSync(fileURLToPath(import.meta.url))).digest('hex');
 const GLOBAL_SESSION_PAGE_SIZE = 100;
 const MAX_GLOBAL_SESSION_PAGES = 50;
@@ -164,6 +164,82 @@ async function globalSessions(client) {
   return sessions;
 }
 
+function catalogText(value, maximum = 512) {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  return normalized.length > 0 && normalized.length <= maximum && !/[\r\n\0]/u.test(normalized)
+    ? normalized
+    : null;
+}
+
+function catalogProviders(value) {
+  if (Array.isArray(value)) return value.filter((item) => item && typeof item === 'object');
+  if (!value || typeof value !== 'object') return [];
+  const source = Array.isArray(value.all) ? value.all : Array.isArray(value.providers) ? value.providers : [];
+  return source.filter((item) => item && typeof item === 'object');
+}
+
+function catalogModelEntries(value) {
+  if (Array.isArray(value)) return value.flatMap((model, index) => model && typeof model === 'object' ? [[String(index), model]] : []);
+  if (!value || typeof value !== 'object') return [];
+  return Object.entries(value).filter(([, model]) => model && typeof model === 'object');
+}
+
+function safeModelCatalog(providerValue, configValue) {
+  const defaults = providerValue && typeof providerValue === 'object' && providerValue.default && typeof providerValue.default === 'object'
+    ? providerValue.default
+    : {};
+  const connected = providerValue && typeof providerValue === 'object' && Array.isArray(providerValue.connected)
+    ? new Set(providerValue.connected.map((id) => catalogText(id, 256)).filter(Boolean))
+    : null;
+  const models = [];
+  const seen = new Set();
+  for (const provider of catalogProviders(providerValue)) {
+    const providerId = catalogText(provider.id, 256);
+    if (!providerId || (connected && !connected.has(providerId))) continue;
+    const providerName = catalogText(provider.name) ?? providerId;
+    for (const [key, model] of catalogModelEntries(provider.models)) {
+      if (model.status === 'deprecated') continue;
+      const modelId = catalogText(model.id) ?? catalogText(key);
+      if (!modelId) continue;
+      const id = `${providerId}/${modelId}`;
+      if (id.length > 512 || seen.has(id)) continue;
+      seen.add(id);
+      models.push({
+        id,
+        providerId,
+        providerName,
+        modelId,
+        name: catalogText(model.name) ?? modelId,
+        providerDefault: defaults[providerId] === modelId,
+      });
+    }
+  }
+  models.sort((left, right) => left.providerName.localeCompare(right.providerName)
+    || left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+  const configuredCandidate = configValue && typeof configValue === 'object' ? catalogText(configValue.model) : null;
+  return {
+    models,
+    configuredModel: configuredCandidate?.includes('/') ? configuredCandidate : null,
+  };
+}
+
+async function liveModelCatalog(client, directory) {
+  const transport = client?._client;
+  if (!transport || typeof transport.get !== 'function') {
+    throw new Error('Esta versión de OpenCode Desktop no expone el catálogo vivo de modelos.');
+  }
+  let providers;
+  try {
+    providers = await sdkData(transport.get({ url: '/provider', query: { directory } }));
+  } catch (error) {
+    if (error?.status !== 404 && error?.status !== 405) throw error;
+    providers = await sdkData(transport.get({ url: '/config/providers', query: { directory } }));
+  }
+  const config = await sdkData(transport.get({ url: '/config', query: { directory } }));
+  return safeModelCatalog(providers, config);
+}
+
 function requestDirectory(url, request, fallback) {
   const query = url.searchParams.get('directory');
   const header = request.headers['x-opencode-directory'];
@@ -240,6 +316,11 @@ export const OpenCodeInfiniteBridge = async ({ client, directory, project, workt
       if (request.method === 'GET' && url.pathname === '/session/status') {
         const data = await sdkData(client.session.status({ query: { directory: scopedDirectory } }));
         json(response, 200, data ?? {});
+        return;
+      }
+
+      if (request.method === 'GET' && url.pathname === '/models') {
+        json(response, 200, await liveModelCatalog(client, scopedDirectory));
         return;
       }
 

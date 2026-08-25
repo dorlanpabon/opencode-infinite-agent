@@ -203,7 +203,7 @@ test('al activar una sesión ocupada espera idle, envía el objetivo y adjunta a
   const run = runLoop({
     req: api.req,
     sessionId,
-    cfg: cfg({ maxIterations: 2 }),
+    cfg: cfg({ maxIterations: 2, model: 'openai/gpt-5.4' }),
     firstPrompt: 'nuevo objetivo verificable',
     firstAttachments: [attachment],
     resumeExisting: true,
@@ -225,6 +225,7 @@ test('al activar una sesión ocupada espera idle, envía el objetivo y adjunta a
   await waitFor(() => api.state.prompts.length === 1);
   assert.equal(attachmentValidations, 1);
   assert.equal(api.state.prompts[0], 'nuevo objetivo verificable');
+  assert.deepEqual(api.state.promptBodies[0].model, { providerID: 'openai', modelID: 'gpt-5.4' });
   assert.deepEqual(api.state.promptBodies[0].parts[1], {
     type: 'file',
     mime: 'text/plain',

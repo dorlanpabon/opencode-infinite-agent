@@ -39,7 +39,7 @@ async function fixture() {
   ]);
   const descriptor = {
     schemaVersion: 1,
-    bridgeVersion: 3,
+    bridgeVersion: 4,
     buildId: createHash('sha256').update(pluginSourceText).digest('hex'),
     bridgeId: 'a'.repeat(32),
     endpoint: 'http://127.0.0.1:43111',
@@ -72,6 +72,13 @@ async function fixture() {
         ];
       }
       if (pathname === '/session/status') return { ses_visible1: { type: 'busy' } };
+      if (pathname === '/models') return {
+        models: [{
+          id: 'openai/gpt-5.4', providerId: 'openai', providerName: 'OpenAI',
+          modelId: 'gpt-5.4', name: 'GPT-5.4', providerDefault: true,
+        }],
+        configuredModel: null,
+      };
       if (pathname === '/session/ses_adopted1') {
         return { id: 'ses_adopted1', title: 'Adoptada', directory: workspace, projectID: descriptor.projectID, time: { created: 3, updated: 4 } };
       }
@@ -125,6 +132,8 @@ test('catálogo Desktop agrega sesiones globales y adopta un oc:// exacto con su
   assert.equal(result.sessions.find((session) => session.id === 'ses_visible1').status, 'busy');
   assert.equal(catalog.endpointForSession('ses_adopted1').endpoint, fx.descriptor.endpoint);
   assert.equal(catalog.endpointForSession('ses_mixed1').directory, fx.otherWorkspace);
+  assert.equal((await catalog.models()).models[0].id, 'openai/gpt-5.4');
+  assert.equal(fx.calls.find((call) => call.pathname === '/models').options.directory, fx.workspace);
   assert.equal(fx.calls.filter((call) => call.type === 'register').at(-1).token, fx.descriptor.token);
 });
 

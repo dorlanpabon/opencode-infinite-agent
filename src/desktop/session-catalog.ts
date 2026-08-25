@@ -1,9 +1,11 @@
 import path from 'node:path';
 import type {
+  OpenCodeModelCatalog,
   OpenCodeSessionStatus,
   OpenCodeSessionSummary,
   SessionConnectionInput,
 } from './contracts.js';
+import { loadOpenCodeModelCatalog } from './model-catalog.js';
 
 interface ServerHandle {
   base: string;
@@ -239,6 +241,17 @@ export class OpenCodeSessionCatalog {
 
   current(): OpenCodeSessionSummary[] {
     return this.snapshot.map((session) => ({ ...session }));
+  }
+
+  async models(): Promise<OpenCodeModelCatalog> {
+    const current = this.connection;
+    if (!current) throw new Error('El catálogo de sesiones no está conectado.');
+    return loadOpenCodeModelCatalog(
+      this.dependencies.server,
+      current.handle.base,
+      current.input.workspace,
+      current.controller.signal,
+    );
   }
 
   async close(): Promise<void> {

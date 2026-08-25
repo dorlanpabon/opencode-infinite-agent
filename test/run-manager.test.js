@@ -105,6 +105,31 @@ test('RunManager migra historial schema 1 sin adjuntos', async (t) => {
   assert.deepEqual((await manager.listRuns())[0].attachments, []);
 });
 
+test('RunManager expone el catálogo de modelos del servidor vivo sin persistirlo', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'opencode-infinite-models-'));
+  const workspace = path.join(root, 'workspace');
+  await mkdir(workspace);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let received;
+  const catalog = {
+    models: [{
+      id: 'openai/gpt-5.4', providerId: 'openai', providerName: 'OpenAI',
+      modelId: 'gpt-5.4', name: 'GPT-5.4', providerDefault: true,
+    }],
+    configuredModel: null,
+  };
+  const manager = new RunManager(() => undefined, root, {
+    doctor: async () => ({ ok: true, engineAvailable: true, workspaceReady: true, binaryReady: null,
+      attachReady: null, mode: 'dedicated', serverVersion: null, endpoint: null, warnings: [] }),
+    run: async () => ({ status: 'completed', reason: 'done' }),
+    listModels: async (value) => { received = value; return catalog; },
+  });
+  await manager.initialize();
+  const connection = { workspace, binary: null, attach: null, sessionRef: null };
+  assert.deepEqual(await manager.listModels(connection), catalog);
+  assert.deepEqual(received, connection);
+});
+
 test('RunManager persiste progreso y finalización del adaptador real boundary', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'opencode-infinite-manager-'));
   const workspace = path.join(root, 'workspace');

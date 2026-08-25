@@ -6,6 +6,7 @@ import type {
   DoctorInput,
   DoctorResult,
   LogLevel,
+  OpenCodeModelCatalog,
   OpenCodeSessionSummary,
   OperationReceipt,
   RunAttachment,
@@ -86,6 +87,7 @@ export interface DesktopEngineAdapter {
     input: SessionConnectionInput,
     listener: (sessions: OpenCodeSessionSummary[]) => void,
   ): Promise<OpenCodeSessionSummary[]>;
+  listModels?(input: SessionConnectionInput): Promise<OpenCodeModelCatalog>;
   stop?(runId: string, sessionId: string | null): Promise<void>;
   shutdown?(): Promise<void>;
 }
@@ -283,6 +285,20 @@ export class RunManager {
     const sessions = await this.adapter.listSessions(input, (next) => this.updateCatalog(next));
     this.updateCatalog(sessions);
     return this.decorateSessions();
+  }
+
+  async listModels(input: SessionConnectionInput): Promise<OpenCodeModelCatalog> {
+    if (!this.adapter?.listModels) {
+      throw new DesktopRunError('MODELS_UNAVAILABLE', 'El motor OpenCode no expone un catálogo de modelos.');
+    }
+    const activeState = [...this.active.keys()].map((runId) => this.states.get(runId)).find(Boolean);
+    if (activeState && sessionConnectionKey(input) !== sessionConnectionKey(activeState)) {
+      throw new DesktopRunError(
+        'ENGINE_BUSY',
+        'No se puede cambiar el servidor de modelos mientras existe una ejecución activa.',
+      );
+    }
+    return this.adapter.listModels(input);
   }
 
   async setContinuous(input: SetContinuousInput): Promise<OperationReceipt> {

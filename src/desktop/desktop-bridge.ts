@@ -3,10 +3,12 @@ import { chmod, lstat, mkdir, readFile, readdir, realpath, rename, unlink, write
 import os from 'node:os';
 import path from 'node:path';
 import type {
+  OpenCodeModelCatalog,
   OpenCodeSessionStatus,
   OpenCodeSessionSummary,
   SessionConnectionInput,
 } from './contracts.js';
+import { parseOpenCodeModelCatalog } from './model-catalog.js';
 
 const { parseSessionRef } = require('../session-ref.js') as {
   parseSessionRef(input: unknown): string | null;
@@ -64,7 +66,7 @@ const serverModule = require('../server.js') as ServerModule;
 const SESSION_ID = /^ses_[A-Za-z0-9]+$/u;
 const PLUGIN_MARKER = Buffer.from('// opencode-infinite-agent:desktop-bridge\n');
 const LEGACY_PLUGIN_HASHES = new Set(['fd43559cf1f06118dd3300c2dfeb20b85ea24fcf14ec1261b54350f8b4197d3f']);
-const REQUIRED_BRIDGE_VERSION = 3;
+const REQUIRED_BRIDGE_VERSION = 4;
 const BRIDGE_FAILURE_LIMIT = 3;
 const RECONCILE_EVENTS = new Set([
   'server.connected',
@@ -457,7 +459,8 @@ export class OpenCodeDesktopBridgeCatalog {
         throw new Error('Ningún sidecar de OpenCode Desktop abrió su stream de eventos.');
       }
       this.active = active;
-      return { sessions: await this.reconcile() };
+      const sessions = await this.reconcile();
+      return { sessions };
     } catch (error) {
       for (const endpoint of opening) {
         this.openingControllers.delete(endpoint.controller);
@@ -474,10 +477,32 @@ export class OpenCodeDesktopBridgeCatalog {
     return this.snapshot.map((session) => ({ ...session }));
   }
 
+  get connected(): boolean {
+    return this.active.length > 0;
+  }
+
   endpointForSession(sessionId: string): DesktopBridgeDescriptor {
     const endpoint = this.endpointBySession.get(sessionId);
     if (!endpoint) throw new Error('La sesión ya no está disponible en OpenCode Desktop. Vuelve a conectar el catálogo.');
     return { ...endpoint };
+  }
+
+  async models(workspace?: string): Promise<OpenCodeModelCatalog> {
+    const requestedWorkspace = workspace ? path.resolve(workspace) : this.requestedWorkspace;
+    if (!requestedWorkspace || this.active.length === 0) {
+      throw new Error('El catálogo de OpenCode Desktop no está conectado.');
+    }
+    const endpoint = this.active.find(({ descriptor }) => normalizedPath(descriptor.directory) === normalizedPath(requestedWorkspace))
+      ?? this.active[0];
+    if (!endpoint) throw new Error('OpenCode Desktop no expone un sidecar activo para este workspace.');
+    const value = await this.dependencies.server.request(
+      endpoint.descriptor.endpoint,
+      'GET',
+      '/models',
+      null,
+      { directory: requestedWorkspace, timeoutMs: 15_000 },
+    );
+    return parseOpenCodeModelCatalog(value);
   }
 
   async reconcile(): Promise<OpenCodeSessionSummary[]> {

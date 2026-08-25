@@ -1,6 +1,7 @@
 import type {
   DoctorInput,
   DoctorResult,
+  OpenCodeModelCatalog,
   OpenCodeSessionSummary,
   SessionConnectionInput,
   StartRunInput,
@@ -260,6 +261,15 @@ export function createOpenCodeEngineAdapter(): DesktopEngineAdapter {
       return catalogMode === 'desktop'
         ? (await desktopCatalog.connect(input)).sessions
         : (await catalog.connect(input)).sessions;
+    },
+    async listModels(input): Promise<OpenCodeModelCatalog> {
+      catalogMode = input.attach === null ? 'desktop' : 'server';
+      if (catalogMode === 'desktop') {
+        if (!desktopCatalog.connected) await desktopCatalog.connect(input);
+        return desktopCatalog.models(input.workspace);
+      }
+      await catalog.connect(input);
+      return catalog.models();
     },
     async shutdown() {
       sessionListener = null;
