@@ -22,7 +22,7 @@ Los instaladores de cada versión están en [GitHub Releases](https://github.com
 | Debian/Ubuntu | x64 / ARM64 | `OpenCode-Infinite-*-linux-*.deb` |
 | Fedora/RHEL | x64 / ARM64 | `OpenCode-Infinite-*-linux-*.rpm` |
 
-La versión estable `2.5.0` se distribuye sin certificado comercial de Windows ni firma o notarización de Apple. SmartScreen o Gatekeeper pueden mostrar una advertencia. Comprueba siempre `SHA256SUMS.txt` antes de instalar.
+La versión estable `2.6.0` se distribuye sin certificado comercial de Windows ni firma o notarización de Apple. SmartScreen o Gatekeeper pueden mostrar una advertencia. Comprueba siempre `SHA256SUMS.txt` antes de instalar.
 
 Cada artefacto y `SHA256SUMS.txt` incluye procedencia firmada por GitHub/Sigstore. Puedes verificarla con `gh attestation verify <archivo> -R dorlanpabon/opencode-infinite-agent`; esto acredita el workflow y commit de origen, pero no reemplaza Authenticode ni la notarización de Apple.
 
@@ -44,6 +44,8 @@ La aplicación se integra con el proceso propietario de OpenCode Desktop mediant
 6. Para una tarea nueva, usa **Nueva ejecución**, elige el workspace y pulsa **Iniciar supervisor**.
 
 La interfaz muestra el ciclo del turno, estado del stream, sesión, iteración, consumo, historial y logs. Solo permite una ejecución activa por instancia y conserva el estado de forma atómica para recuperarse tras un cierre. Las tareas nuevas usan un servidor dedicado; las sesiones existentes continúan dentro del sidecar que realmente las posee.
+
+Cada corrida y sesión puede copiarse como `opencode-infinite://run/<uuid>` o `opencode-infinite://session/<ses_id>`. Abrir uno de estos enlaces en Windows, macOS o Linux solo enfoca la aplicación y selecciona la referencia; nunca inicia, reanuda ni detiene trabajo automáticamente. Las corridas detenidas, fallidas o bloqueadas se pueden reanudar con confirmación: se crea una corrida sucesora enlazada al historial anterior y se reutiliza la sesión exacta cuando existe. Si se había desactivado el supervisor mientras OpenCode seguía trabajando, la sucesora adopta ese turno y no repite el objetivo ni los adjuntos. El inspector permite cargar bajo demanda hasta 20 mensajes recientes de usuario/asistente; ese contexto se filtra, limita y no se persiste.
 
 Si `config.model` está vacío, OpenCode Infinite lo indica como **sin predeterminado global** y deja la elección automática a OpenCode; no presenta como global ninguno de los defaults por proveedor. Elegir `proveedor/modelo` lo envía explícitamente en cada turno. En una sesión existente, dejar el campo vacío conserva la resolución nativa de OpenCode entre el agente y la sesión. Si el catálogo no carga, el objetivo no queda bloqueado: puedes escribir un ID completo manualmente y reintentar la consulta.
 

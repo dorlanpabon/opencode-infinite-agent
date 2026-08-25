@@ -3,10 +3,11 @@ import type {
   DoctorResult,
   OpenCodeModelCatalog,
   OpenCodeSessionSummary,
+  SessionContext,
+  SessionContextInput,
   SessionConnectionInput,
-  StartRunInput,
 } from './contracts.js';
-import type { DesktopEngineAdapter, EngineRunContext, EngineRunResult } from './run-manager.js';
+import type { DesktopEngineAdapter, EngineRunContext, EngineRunResult, EngineStartInput } from './run-manager.js';
 import { assertAttachmentMetadata } from './attachments.js';
 import { OpenCodeDesktopBridgeCatalog } from './desktop-bridge.js';
 import { OpenCodeSessionCatalog } from './session-catalog.js';
@@ -23,11 +24,11 @@ interface AgentResult {
   };
 }
 
-interface AgentModule {
+export interface AgentModule {
   executeAgent(input: Record<string, unknown>, options: {
     signal: AbortSignal;
     log: Record<string, (message: string) => void>;
-    onSession(sessionId: string): void;
+    onSession(sessionId: string): void | Promise<void>;
     onTransport(state: 'connecting' | 'connected' | 'closed'): void;
     onState(event: {
       phase: 'working' | 'continuing' | 'settling';
@@ -46,7 +47,35 @@ interface ServerModule {
   health(base: string): Promise<string | null>;
 }
 
-const agentModule = require('../agent.js') as AgentModule;
+export interface ServerSessionCatalogAdapter {
+  setListener(listener: (sessions: OpenCodeSessionSummary[]) => void): void;
+  matches(input: SessionConnectionInput): boolean;
+  connect(input: SessionConnectionInput): Promise<{ base: string; sessions: OpenCodeSessionSummary[] }>;
+  reconcile(): Promise<OpenCodeSessionSummary[]>;
+  models(): Promise<OpenCodeModelCatalog>;
+  context(sessionId: string, limit: number): Promise<SessionContext>;
+  close(): Promise<void>;
+}
+
+export interface DesktopSessionCatalogAdapter {
+  setListener(listener: (sessions: OpenCodeSessionSummary[]) => void): void;
+  readonly connected: boolean;
+  connect(input: SessionConnectionInput): Promise<{ sessions: OpenCodeSessionSummary[] }>;
+  endpointForSession(sessionId: string): { endpoint: string; directory: string };
+  reconcile(): Promise<OpenCodeSessionSummary[]>;
+  models(workspace?: string): Promise<OpenCodeModelCatalog>;
+  context(sessionId: string, workspace: string, limit: number): Promise<SessionContext>;
+  close(): Promise<void>;
+}
+
+export interface OpenCodeEngineAdapterOptions {
+  serverCatalog?: ServerSessionCatalogAdapter;
+  createServerCatalog?: () => ServerSessionCatalogAdapter;
+  desktopCatalog?: DesktopSessionCatalogAdapter;
+  agentModule?: AgentModule;
+}
+
+const defaultAgentModule = require('../agent.js') as AgentModule;
 const serverModule = require('../server.js') as ServerModule;
 
 function emit(context: EngineRunContext, event: Parameters<EngineRunContext['emit']>[0]): void {
@@ -104,10 +133,11 @@ async function doctor(input: DoctorInput): Promise<DoctorResult> {
 }
 
 async function run(
-  input: StartRunInput,
+  input: EngineStartInput,
   context: EngineRunContext,
-  catalog: OpenCodeSessionCatalog,
-  desktopCatalog: OpenCodeDesktopBridgeCatalog,
+  catalog: ServerSessionCatalogAdapter,
+  desktopCatalog: DesktopSessionCatalogAdapter,
+  agentModule: AgentModule,
 ): Promise<EngineRunResult> {
   const controller = new AbortController();
   let wallLimited = false;
@@ -129,7 +159,7 @@ async function run(
       sessionRef: input.sessionRef,
     };
     const ref = input.sessionRef;
-    const isDesktopSession = input.resumeExisting && input.attach === null && Boolean(ref?.startsWith('ses_'));
+    const isDesktopSession = input.connectionMode === 'desktop-sidecar';
     let connection;
     if (isDesktopSession) {
       await desktopCatalog.connect(connectionInput);
@@ -142,10 +172,14 @@ async function run(
     if (desktopSessionId && input.autoApprove) {
       throw new Error('OpenCode Desktop no permite autoaprobar de forma fiable los permisos de una sesión existente. Confírmalos en OpenCode.');
     }
+    const sendObjective = input.recoveryMode === 'new-objective'
+      || (input.recoveryMode === 'recover-first-prompt' && input.firstPromptKind === 'objective');
     const result = await agentModule.executeAgent({
       dir: executionWorkspace,
-      prompt: input.task,
-      attachments: input.attachments,
+      prompt: sendObjective ? input.task : undefined,
+      attachments: sendObjective ? input.attachments : [],
+      recoveryMode: input.recoveryMode,
+      firstPromptMarker: input.firstPromptMarker,
       resumeExisting: input.resumeExisting,
       session: ref && ref.startsWith('ses_') ? ref : undefined,
       deeplink: ref && ref.startsWith('oc://') ? ref : undefined,
@@ -165,7 +199,7 @@ async function run(
     }, {
       signal: controller.signal,
       log: logger(context),
-      onSession: (sessionId) => emit(context, { type: 'session', sessionId }),
+      onSession: (sessionId) => context.emit({ type: 'session', sessionId }),
       onTransport: (state) => {
         emit(context, {
           type: 'transport',
@@ -184,16 +218,18 @@ async function run(
               ? 'Turno incompleto confirmado; enviando la siguiente continuación.'
               : 'OpenCode está trabajando.',
         });
-        emit(context, {
-          type: 'progress',
-          iteration: event.iteration,
-          tokensInput: event.tokens?.input,
-          tokensOutput: event.tokens?.output,
-          cost: event.cost,
-          lastMessage: event.lastText,
-        });
+        if (event.phase === 'settling') {
+          emit(context, {
+            type: 'progress',
+            iteration: event.iteration,
+            tokensInput: event.tokens?.input,
+            tokensOutput: event.tokens?.output,
+            cost: event.cost,
+            lastMessage: event.lastText,
+          });
+        }
       },
-      beforeFirstPrompt: () => assertAttachmentMetadata(input.attachments),
+      beforeFirstPrompt: () => assertAttachmentMetadata(sendObjective ? input.attachments : []),
       abortRemoteOnSignal: !input.resumeExisting,
     });
     void (isDesktopSession ? desktopCatalog.reconcile() : catalog.reconcile()).catch(() => undefined);
@@ -237,13 +273,15 @@ async function run(
   }
 }
 
-export function createOpenCodeEngineAdapter(): DesktopEngineAdapter {
+export function createOpenCodeEngineAdapter(options: OpenCodeEngineAdapterOptions = {}): DesktopEngineAdapter {
   let sessionListener: ((sessions: OpenCodeSessionSummary[]) => void) | null = null;
   let catalogMode: 'desktop' | 'server' = 'desktop';
-  const catalog = new OpenCodeSessionCatalog((level, message) => {
+  const onCatalogLog = (level: 'debug' | 'info' | 'warn', message: string): void => {
     if (level === 'warn') process.stderr.write(`${message}\n`);
-  });
-  const desktopCatalog = new OpenCodeDesktopBridgeCatalog((level, message) => {
+  };
+  const catalog = options.serverCatalog ?? new OpenCodeSessionCatalog(onCatalogLog);
+  const createServerCatalog = options.createServerCatalog ?? (() => new OpenCodeSessionCatalog(onCatalogLog));
+  const desktopCatalog = options.desktopCatalog ?? new OpenCodeDesktopBridgeCatalog((level, message) => {
     if (level === 'warn') process.stderr.write(`${message}\n`);
   });
   catalog.setListener((sessions) => {
@@ -254,22 +292,44 @@ export function createOpenCodeEngineAdapter(): DesktopEngineAdapter {
   });
   return {
     doctor,
-    run: (input, context) => run(input, context, catalog, desktopCatalog),
+    run: (input, context) => run(input, context, catalog, desktopCatalog, options.agentModule ?? defaultAgentModule),
     async listSessions(input, listener) {
       sessionListener = listener;
-      catalogMode = input.attach === null ? 'desktop' : 'server';
-      return catalogMode === 'desktop'
+      const requestedMode = input.attach === null ? 'desktop' : 'server';
+      const sessions = requestedMode === 'desktop'
         ? (await desktopCatalog.connect(input)).sessions
         : (await catalog.connect(input)).sessions;
+      catalogMode = requestedMode;
+      return sessions;
     },
     async listModels(input): Promise<OpenCodeModelCatalog> {
-      catalogMode = input.attach === null ? 'desktop' : 'server';
-      if (catalogMode === 'desktop') {
+      if (input.attach === null) {
         if (!desktopCatalog.connected) await desktopCatalog.connect(input);
         return desktopCatalog.models(input.workspace);
       }
-      await catalog.connect(input);
-      return catalog.models();
+      if (catalogMode === 'server' && catalog.matches(input)) return catalog.models();
+      const transientCatalog = createServerCatalog();
+      try {
+        await transientCatalog.connect(input);
+        return await transientCatalog.models();
+      } finally {
+        await transientCatalog.close();
+      }
+    },
+    async getSessionContext(input): Promise<SessionContext> {
+      const useDesktop = input.connectionMode === 'desktop-sidecar';
+      if (useDesktop) {
+        if (!desktopCatalog.connected) await desktopCatalog.connect(input);
+        return desktopCatalog.context(input.sessionId, input.workspace, input.limit);
+      }
+      if (catalog.matches(input)) return catalog.context(input.sessionId, input.limit);
+      const transientCatalog = createServerCatalog();
+      try {
+        await transientCatalog.connect(input);
+        return await transientCatalog.context(input.sessionId, input.limit);
+      } finally {
+        await transientCatalog.close();
+      }
     },
     async shutdown() {
       sessionListener = null;

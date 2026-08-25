@@ -15,8 +15,12 @@ const CHANNELS = Object.freeze({
   listModels: 'models:list',
   openOpenCodeProject: 'sessions:open-project',
   copyOpenCodeSessionLink: 'sessions:copy-internal-link',
+  copyRunDeepLink: 'runs:copy-deep-link',
+  copySessionDeepLink: 'sessions:copy-deep-link',
+  getSessionContext: 'sessions:context',
   setContinuous: 'sessions:set-continuous',
   startRun: 'runs:start',
+  resumeRun: 'runs:resume',
   stopRun: 'runs:stop',
   event: 'runs:event',
 });
@@ -44,8 +48,12 @@ const api: DesktopApi = {
   listModels: (input) => ipcRenderer.invoke(CHANNELS.listModels, input),
   openOpenCodeProject: (workspace) => ipcRenderer.invoke(CHANNELS.openOpenCodeProject, { workspace }),
   copyOpenCodeSessionLink: (sessionId) => ipcRenderer.invoke(CHANNELS.copyOpenCodeSessionLink, { sessionId }),
+  copyRunDeepLink: (runId) => ipcRenderer.invoke(CHANNELS.copyRunDeepLink, runId),
+  copySessionDeepLink: (sessionId) => ipcRenderer.invoke(CHANNELS.copySessionDeepLink, { sessionId }),
+  getSessionContext: (input) => ipcRenderer.invoke(CHANNELS.getSessionContext, input),
   setContinuous: (input) => ipcRenderer.invoke(CHANNELS.setContinuous, input),
   startRun: (input) => ipcRenderer.invoke(CHANNELS.startRun, input),
+  resumeRun: (input) => ipcRenderer.invoke(CHANNELS.resumeRun, input),
   stopRun: (runId) => ipcRenderer.invoke(CHANNELS.stopRun, runId),
   onEvent: (listener) => {
     if (typeof listener !== 'function') throw new TypeError('El listener Desktop debe ser una función.');

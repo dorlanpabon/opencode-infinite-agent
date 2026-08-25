@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { lstat, mkdir, mkdtemp, readdir, realpath, rm } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
@@ -51,8 +51,24 @@ async function smokeLinuxPackages() {
     const files = await walkRegularFiles(destination);
     const executable = expectOne(files.filter((file) => path.basename(file) === executableName), `ejecutable del paquete ${format.toUpperCase()}`);
     const sandbox = expectOne(files.filter((file) => path.basename(file) === 'chrome-sandbox'), `chrome-sandbox del paquete ${format.toUpperCase()}`);
+    const desktopEntry = expectOne(files.filter((file) => file.endsWith('.desktop')), `desktop entry del paquete ${format.toUpperCase()}`);
+    await verifyDesktopEntry(desktopEntry);
     await configureLinuxSandbox(sandbox);
     await smokeExecutable(executable);
+  }
+}
+
+async function verifyDesktopEntry(candidate) {
+  const fields = new Map((await readFile(candidate, 'utf8')).split(/\r?\n/u).flatMap((line) => {
+    const separator = line.indexOf('=');
+    return separator > 0 ? [[line.slice(0, separator), line.slice(separator + 1)]] : [];
+  }));
+  const mimeTypes = (fields.get('MimeType') ?? '').split(';').filter(Boolean);
+  if (!mimeTypes.includes('x-scheme-handler/opencode-infinite')) {
+    throw new Error('El desktop entry no registra el protocolo opencode-infinite.');
+  }
+  if (!(fields.get('Exec') ?? '').split(/\s+/u).includes('%U')) {
+    throw new Error('El desktop entry no entrega URLs al proceso mediante %U.');
   }
 }
 

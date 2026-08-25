@@ -39,7 +39,7 @@ async function fixture() {
   ]);
   const descriptor = {
     schemaVersion: 1,
-    bridgeVersion: 4,
+    bridgeVersion: 5,
     buildId: createHash('sha256').update(pluginSourceText).digest('hex'),
     bridgeId: 'a'.repeat(32),
     endpoint: 'http://127.0.0.1:43111',

@@ -4,6 +4,7 @@ const SESSION_ID_REFERENCE = /^ses_[A-Za-z0-9]+$/u;
 const INTERNAL_SESSION_LINK = /^oc:\/\/renderer\/server\/c2lkZWNhcg\/session\/ses_[A-Za-z0-9]+$/u;
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+export type ConnectionMode = 'desktop-sidecar' | 'dedicated' | 'attach';
 export type SseState = 'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'closed';
 export type RunStatus =
   | 'initializing'
@@ -60,6 +61,31 @@ export interface CopySessionLinkInput {
   sessionId: string;
 }
 
+export interface ResumeRunInput {
+  runId: string;
+  confirmed: true;
+}
+
+export interface SessionContextInput extends SessionConnectionInput {
+  connectionMode: ConnectionMode;
+  sessionId: string;
+  limit: number;
+}
+
+export interface SessionContextMessage {
+  role: 'user' | 'assistant';
+  text: string;
+}
+
+export interface SessionContext {
+  sessionId: string;
+  messages: SessionContextMessage[];
+}
+
+export type DeepLinkTarget =
+  | { kind: 'run'; id: string }
+  | { kind: 'session'; id: string };
+
 export type OpenCodeSessionStatus = 'idle' | 'busy' | 'retry';
 
 export interface OpenCodeSessionSummary {
@@ -111,8 +137,11 @@ export interface DoctorResult {
 }
 
 export interface RunState {
-  schemaVersion: 1;
+  schemaVersion: 3;
   runId: string;
+  sourceRunId: string | null;
+  firstPromptMarker: string | null;
+  firstPromptKind: 'objective' | 'continuation' | null;
   operationId: string;
   task: string;
   attachments: RunAttachment[];
@@ -124,6 +153,7 @@ export interface RunState {
   agent: string | null;
   binary: string | null;
   attach: string | null;
+  connectionMode: ConnectionMode;
   status: RunStatus;
   reason: string | null;
   iteration: number;
@@ -161,6 +191,7 @@ export type DesktopEvent =
   | { type: 'operation-finished'; operationId: string; run: RunState }
   | { type: 'operation-error'; operationId: string; runId: string | null; error: { code: string; message: string } }
   | { type: 'sessions-snapshot'; sessions: OpenCodeSessionSummary[] }
+  | { type: 'deep-link'; target: DeepLinkTarget }
   | { type: 'log'; operationId: string | null; runId: string | null; level: LogLevel; message: string; timestamp: string };
 
 export interface DesktopApi {
@@ -176,8 +207,12 @@ export interface DesktopApi {
   listModels(input: SessionConnectionInput): Promise<OpenCodeModelCatalog>;
   openOpenCodeProject(workspace: string): Promise<void>;
   copyOpenCodeSessionLink(sessionId: string): Promise<void>;
+  copyRunDeepLink(runId: string): Promise<void>;
+  copySessionDeepLink(sessionId: string): Promise<void>;
+  getSessionContext(input: SessionContextInput): Promise<SessionContext>;
   setContinuous(input: SetContinuousInput): Promise<OperationReceipt>;
   startRun(input: StartRunInput): Promise<OperationReceipt>;
+  resumeRun(input: ResumeRunInput): Promise<OperationReceipt>;
   stopRun(runId: string): Promise<OperationReceipt>;
   onEvent(listener: (event: DesktopEvent) => void): () => void;
 }
@@ -393,8 +428,63 @@ export function parseRunId(value: unknown): string {
   return value;
 }
 
+export function parseResumeRunInput(value: unknown): ResumeRunInput {
+  if (!isRecord(value) || !hasExactKeys(value, ['confirmed', 'runId']) || value.confirmed !== true) {
+    throw new TypeError('La reanudación requiere confirmación explícita.');
+  }
+  return { runId: parseRunId(value.runId), confirmed: true };
+}
+
+export function parseSessionContextInput(value: unknown): SessionContextInput {
+  if (!isRecord(value) || !hasExactKeys(value, ['attach', 'binary', 'connectionMode', 'limit', 'sessionId', 'sessionRef', 'workspace'])
+    || !boundedNumber(value.limit, 1, 20, true)
+    || (value.connectionMode !== 'desktop-sidecar' && value.connectionMode !== 'dedicated' && value.connectionMode !== 'attach')) {
+    throw new TypeError('Parámetros de contexto inválidos.');
+  }
+  const connection = parseSessionConnectionInput({
+    workspace: value.workspace,
+    binary: value.binary,
+    attach: value.attach,
+    sessionRef: value.sessionRef,
+  });
+  const sessionId = parseSessionId(value.sessionId);
+  const referencedSessionId = connection.sessionRef === null
+    ? null
+    : SESSION_ID_REFERENCE.test(connection.sessionRef)
+      ? connection.sessionRef
+      : connection.sessionRef.slice(connection.sessionRef.lastIndexOf('/') + 1);
+  if ((value.connectionMode === 'attach') !== (connection.attach !== null)
+    || (referencedSessionId !== null && referencedSessionId !== sessionId)) {
+    throw new TypeError('Parámetros de contexto inválidos.');
+  }
+  return { ...connection, sessionId, connectionMode: value.connectionMode, limit: value.limit };
+}
+
+export function parseDeepLink(value: unknown): DeepLinkTarget | null {
+  if (typeof value !== 'string' || value.length > 2_048) return null;
+  const run = /^opencode-infinite:\/\/run\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/u.exec(value);
+  if (run?.[1]) return { kind: 'run', id: run[1] };
+  const session = /^opencode-infinite:\/\/session\/(ses_[A-Za-z0-9]+)$/u.exec(value);
+  if (session?.[1]) return { kind: 'session', id: session[1] };
+  return null;
+}
+
+export function buildRunDeepLink(runId: string): string {
+  return `opencode-infinite://run/${parseRunId(runId).toLowerCase()}`;
+}
+
+export function buildSessionDeepLink(sessionId: string): string {
+  return `opencode-infinite://session/${parseSessionId(sessionId)}`;
+}
+
 export function isDesktopEvent(value: unknown): value is DesktopEvent {
   if (!isRecord(value) || typeof value.type !== 'string') return false;
+  if (value.type === 'deep-link') {
+    if (!isRecord(value.target) || !hasExactKeys(value.target, ['id', 'kind']) || typeof value.target.id !== 'string') return false;
+    if (value.target.kind === 'run') return parseDeepLink(`opencode-infinite://run/${value.target.id}`) !== null;
+    if (value.target.kind === 'session') return parseDeepLink(`opencode-infinite://session/${value.target.id}`) !== null;
+    return false;
+  }
   return value.type === 'run-changed' || value.type === 'operation-finished'
     || value.type === 'operation-error' || value.type === 'sessions-snapshot' || value.type === 'log';
 }

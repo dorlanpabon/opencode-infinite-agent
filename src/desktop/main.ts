@@ -14,14 +14,20 @@ import {
 } from 'electron';
 import {
   DESKTOP_ORIGIN,
+  buildRunDeepLink,
+  buildSessionDeepLink,
   parseDoctorInput,
   parseCopySessionLinkInput,
+  parseDeepLink,
   parseOpenProjectInput,
   parseRunId,
+  parseResumeRunInput,
+  parseSessionContextInput,
   parseSessionConnectionInput,
   parseSetContinuousInput,
   parseStartRunInput,
   type DesktopEvent,
+  type DeepLinkTarget,
   type DoctorInput,
   type DoctorResult,
   type SessionConnectionInput,
@@ -49,8 +55,12 @@ const CHANNELS = {
   listModels: 'models:list',
   openOpenCodeProject: 'sessions:open-project',
   copyOpenCodeSessionLink: 'sessions:copy-internal-link',
+  copyRunDeepLink: 'runs:copy-deep-link',
+  copySessionDeepLink: 'sessions:copy-deep-link',
+  getSessionContext: 'sessions:context',
   setContinuous: 'sessions:set-continuous',
   startRun: 'runs:start',
+  resumeRun: 'runs:resume',
   stopRun: 'runs:stop',
   event: 'runs:event',
 } as const;
@@ -75,7 +85,6 @@ const rendererFiles = new Map<string, { file: string; contentType: string }>([
   ['/index.html', { file: 'renderer/index.html', contentType: 'text/html; charset=utf-8' }],
   ['/app.css', { file: 'renderer/app.css', contentType: 'text/css; charset=utf-8' }],
   ['/app.js', { file: 'renderer/app.js', contentType: 'text/javascript; charset=utf-8' }],
-  ['/contracts.js', { file: 'contracts.js', contentType: 'text/javascript; charset=utf-8' }],
 ]);
 
 let mainWindow: BrowserWindow | null = null;
@@ -83,6 +92,10 @@ let runManager: RunManager | null = null;
 let configuredAdapter: DesktopEngineAdapter | null = createOpenCodeEngineAdapter();
 let allowQuit = false;
 let shutdownStarted = false;
+let desktopReady = false;
+let rendererReady = false;
+const pendingDeepLinks: DeepLinkTarget[] = [];
+const MAX_PENDING_DEEP_LINKS = 20;
 
 protocol.registerSchemesAsPrivileged([{
   scheme: 'opencode-infinite',
@@ -107,6 +120,46 @@ function manager(): RunManager {
 
 function publish(event: DesktopEvent): void {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(CHANNELS.event, event);
+}
+
+function focusMainWindow(): void {
+  if (!desktopReady) return;
+  if (!mainWindow) mainWindow = createWindow();
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function flushDeepLinks(): void {
+  if (!rendererReady || !mainWindow || mainWindow.isDestroyed()) return;
+  for (const target of pendingDeepLinks.splice(0)) publish({ type: 'deep-link', target });
+  focusMainWindow();
+}
+
+function queueDeepLink(raw: unknown): boolean {
+  const target = parseDeepLink(raw);
+  if (!target) return false;
+  if (pendingDeepLinks.length >= MAX_PENDING_DEEP_LINKS) pendingDeepLinks.shift();
+  pendingDeepLinks.push(target);
+  if (desktopReady) {
+    focusMainWindow();
+    flushDeepLinks();
+  }
+  return true;
+}
+
+function queueDeepLinksFromArgv(argv: readonly string[]): boolean {
+  return argv.reduce((accepted, argument) => queueDeepLink(argument) || accepted, false);
+}
+
+function registerDefaultProtocolClient(): void {
+  if (app.isPackaged) {
+    app.setAsDefaultProtocolClient('opencode-infinite');
+    return;
+  }
+  if (process.defaultApp && process.argv[1]) {
+    app.setAsDefaultProtocolClient('opencode-infinite', process.execPath, [path.resolve(process.argv[1])]);
+  }
 }
 
 function assertTrustedSender(event: IpcMainInvokeEvent): void {
@@ -259,6 +312,21 @@ function registerHandlers(): void {
     const input = parseCopySessionLinkInput(raw);
     clipboard.writeText(buildOpenCodeInternalSessionLink(input.sessionId));
   });
+  ipcMain.handle(CHANNELS.copyRunDeepLink, (event, raw: unknown) => {
+    assertTrustedSender(event);
+    clipboard.writeText(buildRunDeepLink(parseRunId(raw)));
+  });
+  ipcMain.handle(CHANNELS.copySessionDeepLink, (event, raw: unknown) => {
+    assertTrustedSender(event);
+    const input = parseCopySessionLinkInput(raw);
+    clipboard.writeText(buildSessionDeepLink(input.sessionId));
+  });
+  ipcMain.handle(CHANNELS.getSessionContext, async (event, raw: unknown) => {
+    assertTrustedSender(event);
+    const input = parseSessionContextInput(raw);
+    await assertConnectionPaths(input);
+    return manager().getSessionContext(input);
+  });
   ipcMain.handle(CHANNELS.setContinuous, async (event, raw: unknown) => {
     assertTrustedSender(event);
     const input = parseSetContinuousInput(raw);
@@ -270,6 +338,10 @@ function registerHandlers(): void {
     const input = parseStartRunInput(raw);
     await assertStartPaths(input);
     return manager().start(input);
+  });
+  ipcMain.handle(CHANNELS.resumeRun, async (event, raw: unknown) => {
+    assertTrustedSender(event);
+    return manager().resume(parseResumeRunInput(raw));
   });
   ipcMain.handle(CHANNELS.stopRun, async (event, raw: unknown) => {
     assertTrustedSender(event);
@@ -307,6 +379,7 @@ async function registerRendererProtocol(): Promise<void> {
 }
 
 function createWindow(): BrowserWindow {
+  rendererReady = false;
   const window = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -340,6 +413,11 @@ function createWindow(): BrowserWindow {
     process.stderr.write(`Renderer terminado: ${safeError(details.reason)}\n`);
   });
   window.setMenuBarVisibility(false);
+  window.webContents.once('did-finish-load', () => {
+    if (mainWindow !== window) return;
+    rendererReady = true;
+    flushDeepLinks();
+  });
   window.once('ready-to-show', () => window.show());
   window.on('closed', () => { if (mainWindow === window) mainWindow = null; });
   void window.loadURL(`${DESKTOP_ORIGIN}/index.html`);
@@ -350,11 +428,14 @@ const hasSingleInstanceLock = !squirrelStartup && app.requestSingleInstanceLock(
 if (squirrelStartup || !hasSingleInstanceLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
-    if (!mainWindow) mainWindow = createWindow();
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-    mainWindow.focus();
+  queueDeepLinksFromArgv(process.argv);
+  app.on('open-url', (event, url) => {
+    event.preventDefault();
+    queueDeepLink(url);
+  });
+  app.on('second-instance', (_event, argv) => {
+    queueDeepLinksFromArgv(argv);
+    focusMainWindow();
   });
 
   app.on('web-contents-created', (_event, contents) => {
@@ -362,6 +443,7 @@ if (squirrelStartup || !hasSingleInstanceLock) {
   });
 
   app.whenReady().then(async () => {
+    registerDefaultProtocolClient();
     Menu.setApplicationMenu(process.platform === 'darwin'
       ? Menu.buildFromTemplate([{ role: 'appMenu' }, { role: 'editMenu' }, { role: 'windowMenu' }])
       : null);
@@ -371,6 +453,7 @@ if (squirrelStartup || !hasSingleInstanceLock) {
     runManager = new RunManager(publish, app.getPath('userData'), configuredAdapter);
     await runManager.initialize();
     registerHandlers();
+    desktopReady = true;
     mainWindow = createWindow();
   }).catch((error) => {
     process.stderr.write(`${safeError(error)}\n`);
@@ -378,11 +461,7 @@ if (squirrelStartup || !hasSingleInstanceLock) {
   });
 
   app.on('activate', () => {
-    if (!mainWindow) mainWindow = createWindow();
-    else {
-      mainWindow.show();
-      mainWindow.focus();
-    }
+    focusMainWindow();
   });
 
   app.on('window-all-closed', () => {

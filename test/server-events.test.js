@@ -135,6 +135,27 @@ test('request redacta credenciales del cuerpo de errores HTTP', async () => {
   );
 });
 
+test('request corta cuerpos de contexto que exceden el límite antes de materializarlos', async () => {
+  const fetchImpl = async () => new Response('x'.repeat(4_096), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+  await assert.rejects(
+    () => request('http://127.0.0.1:4096', 'GET', '/session/ses_large/message', null, {
+      fetchImpl,
+      maxResponseBytes: 1_024,
+    }),
+    /excede el límite de 1024 bytes/iu,
+  );
+  await assert.rejects(
+    () => request('http://127.0.0.1:4096', 'GET', '/session/ses_large/message', null, {
+      fetchImpl,
+      maxResponseBytes: 0,
+    }),
+    /entero positivo/iu,
+  );
+});
+
 test('SSE vence una conexion muda, cancela el lector y reconecta con workspace', async () => {
   const calls = [];
   let cancels = 0;

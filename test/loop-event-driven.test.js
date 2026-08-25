@@ -249,6 +249,75 @@ test('al activar una sesión ocupada espera idle, envía el objetivo y adjunta a
   assert.equal((await run).status, 'complete');
 });
 
+test('recover-first-prompt espera un turno ajeno y luego envía el objetivo durable', async () => {
+  const sessionId = 'ses_recover_before_send';
+  const marker = '<!-- opencode-infinite-agent-turn:11111111-1111-4111-8111-111111111111 -->';
+  const stream = fakeEventStream();
+  const api = harness(sessionId, stream);
+  const running = assistant('msg_previous_work', sessionId, '', false, 'msg_previous_user');
+  api.state.messages = [user('msg_previous_user', sessionId, 'turno manual anterior'), running];
+  api.state.status = { [sessionId]: { type: 'busy' } };
+  const run = runLoop({
+    req: api.req,
+    sessionId,
+    cfg: cfg({ maxIterations: 1 }),
+    firstPrompt: 'objetivo que aún no se había enviado',
+    firstPromptMarker: marker,
+    recoverPromptMarker: marker,
+    resumeExisting: true,
+    flag: { aborted: false, signal: new AbortController().signal },
+    log: logger(),
+    eventStream: stream,
+  });
+
+  await delay(20);
+  assert.equal(api.state.prompts.length, 0);
+  running.info.time.completed = Date.now();
+  running.parts = [{ type: 'text', text: '[TASK_COMPLETE] ajeno' }];
+  api.state.status = {};
+  stream.emit({ type: 'message.updated', properties: { info: running.info } });
+  stream.emit({ type: 'session.idle', properties: { sessionID: sessionId } });
+  await waitFor(() => api.state.prompts.length === 1);
+  assert.equal(api.state.prompts[0], 'objetivo que aún no se había enviado');
+  assert.equal(api.state.promptBodies[0].parts.at(-1).text, marker);
+
+  const reply = assistant('msg_recovered_reply', sessionId, '[TASK_COMPLETE]', true, api.state.promptIds[0]);
+  api.state.messages.push(reply);
+  api.state.status = {};
+  stream.emit({ type: 'message.updated', properties: { info: reply.info } });
+  stream.emit({ type: 'session.idle', properties: { sessionID: sessionId } });
+  assert.equal((await run).status, 'complete');
+  assert.equal(api.state.prompts.length, 1);
+});
+
+test('recover-first-prompt adopta por marca durable una respuesta ya aceptada sin repetir objetivo', async () => {
+  const sessionId = 'ses_recover_accepted';
+  const marker = '<!-- opencode-infinite-agent-turn:22222222-2222-4222-8222-222222222222 -->';
+  const stream = fakeEventStream();
+  const api = harness(sessionId, stream);
+  const body = buildMessageBody(cfg(), 'objetivo original', [], marker);
+  api.state.messages = [
+    user('msg_original_user', sessionId, body.parts),
+    assistant('msg_original_reply', sessionId, '[TASK_COMPLETE]', true, 'msg_original_user'),
+  ];
+  api.state.status = {};
+
+  const result = await runLoop({
+    req: api.req,
+    sessionId,
+    cfg: cfg({ maxIterations: 1 }),
+    firstPrompt: 'objetivo original',
+    firstPromptMarker: marker,
+    recoverPromptMarker: marker,
+    resumeExisting: true,
+    flag: { aborted: false, signal: new AbortController().signal },
+    log: logger(),
+    eventStream: stream,
+  });
+  assert.equal(result.status, 'complete');
+  assert.equal(api.state.prompts.length, 0);
+});
+
 test('no envia antes de que SSE este conectado', async () => {
   const sessionId = 'ses_connect_first';
   const stream = fakeEventStream();

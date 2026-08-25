@@ -81,10 +81,14 @@
               <h1 id="run-name">Ejecución</h1>
               <p id="run-task">—</p>
             </div>
-            <button class="button button--danger" id="stop-run-button" type="button">
-              <span aria-hidden="true">■</span>
-              Detener
-            </button>
+            <div class="run-header-actions">
+              <button class="button button--secondary" id="copy-run-link-button" type="button">Copiar enlace</button>
+              <button class="button button--primary" id="resume-run-button" type="button" hidden>Reanudar</button>
+              <button class="button button--danger" id="stop-run-button" type="button">
+                <span aria-hidden="true">■</span>
+                Detener
+              </button>
+            </div>
           </header>
 
           <section class="metrics" aria-label="Métricas de ejecución">
@@ -183,6 +187,7 @@
             <span class="eyebrow">Ejecución seleccionada</span>
             <dl class="inspector-list spaced">
               <div><dt>Run ID</dt><dd id="inspect-run-id">—</dd></div>
+              <div><dt>Origen</dt><dd id="inspect-source-run">—</dd></div>
               <div><dt>Sesión</dt><dd id="inspect-session">—</dd></div>
               <div><dt>Workspace</dt><dd id="inspect-workspace">—</dd></div>
               <div><dt>Modelo</dt><dd id="inspect-model">Predeterminado</dd></div>
@@ -192,7 +197,17 @@
             <div class="inspector-actions" id="inspect-session-actions" hidden>
               <button class="button button--secondary" id="inspect-open-project-button" type="button">Abrir proyecto en OpenCode</button>
               <button class="button button--secondary" id="inspect-copy-session-link-button" type="button">Copiar enlace interno</button>
+              <button class="button button--secondary" id="inspect-copy-infinite-session-link-button" type="button">Copiar enlace Infinite</button>
             </div>
+          </div>
+
+          <div class="inspector-block" id="session-context-block">
+            <div class="inspector-title">
+              <span class="eyebrow">Contexto reciente</span>
+              <button class="text-button" id="refresh-session-context-button" type="button">Cargar</button>
+            </div>
+            <p class="context-status" id="session-context-status">Selecciona una sesión o una ejecución vinculada.</p>
+            <ol class="context-list" id="session-context-list" aria-live="polite"></ol>
           </div>
 
           <div class="inspector-note">

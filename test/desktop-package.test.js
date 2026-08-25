@@ -25,6 +25,8 @@ test('renderer, puente y ventana Desktop conservan aislamiento estricto', async 
   assert.match(preload, /sessions:open-project/u);
   assert.match(preload, /sessions:copy-internal-link/u);
   assert.match(preload, /models:list/u);
+  assert.match(preload, /runs:resume/u);
+  assert.match(preload, /sessions:context/u);
   assert.doesNotMatch(preload, /openExternal/u);
   assert.match(mainSource, /shell\.openExternal\(buildOpenCodeProjectUrl\(input\.workspace\)\)/u);
   assert.match(mainSource, /clipboard\.writeText\(buildOpenCodeInternalSessionLink\(input\.sessionId\)\)/u);
@@ -39,6 +41,29 @@ test('renderer, puente y ventana Desktop conservan aislamiento estricto', async 
   assert.match(plugin, /OpenCodeInfiniteBridge/u);
   assert.match(plugin, /127\.0\.0\.1/u);
   assert.match(plugin, /timingSafeEqual/u);
+  assert.match(plugin, /BRIDGE_VERSION = 5/u);
+  assert.match(plugin, /MAX_CONTEXT_MESSAGES = 20/u);
+});
+
+test('deeplinks del sistema se encolan en cold/warm/mac y solo seleccionan después de inicializar', async () => {
+  const [mainSource, rendererSource] = await Promise.all([
+    readFile(path.join(root, 'src', 'desktop', 'main.ts'), 'utf8'),
+    readFile(path.join(root, 'src', 'desktop', 'renderer', 'app.ts'), 'utf8'),
+  ]);
+  assert.match(mainSource, /queueDeepLinksFromArgv\(process\.argv\)/u);
+  assert.match(mainSource, /app\.on\('second-instance',[\s\S]*queueDeepLinksFromArgv\(argv\)/u);
+  assert.match(mainSource, /app\.on\('open-url',[\s\S]*queueDeepLink\(url\)/u);
+  assert.match(mainSource, /MAX_PENDING_DEEP_LINKS = 20/u);
+  assert.match(mainSource, /did-finish-load[\s\S]*flushDeepLinks\(\)/u);
+  assert.match(rendererSource, /pendingDeepLinkTargets\.length >= 20[\s\S]*pendingDeepLinkTargets\.push\(event\.target\)/u);
+  assert.match(rendererSource, /initialized = true;[\s\S]*pendingDeepLinkTargets\.splice\(0\)[\s\S]*applyDeepLinkTarget\(target\)/u);
+  const selector = rendererSource.slice(
+    rendererSource.indexOf('function applyDeepLinkTarget'),
+    rendererSource.indexOf('function handleDesktopEvent'),
+  );
+  assert.match(selector, /selectedRunId = run\.runId/u);
+  assert.match(selector, /selectedSessionId = target\.id/u);
+  assert.doesNotMatch(selector, /startRun|resumeRun|setContinuous/u);
 });
 
 test('renderer conserva navegación y foco accesibles en sesiones', async () => {
@@ -106,6 +131,10 @@ test('paquete Electron usa allowlist y makers multiplataforma', () => {
   assert.ok(makers.some((maker) => maker.platforms?.includes('win32')));
   assert.ok(makers.some((maker) => maker.platforms?.includes('darwin')));
   assert.equal(makers.filter((maker) => maker.platforms?.includes('linux')).length, 2);
+  assert.deepEqual(packagerConfig.protocols, [{ name: 'OpenCode Infinite', schemes: ['opencode-infinite'] }]);
+  for (const maker of makers.filter((candidate) => candidate.platforms?.includes('linux'))) {
+    assert.deepEqual(maker.config.options.mimeType, ['x-scheme-handler/opencode-infinite']);
+  }
 });
 
 test('plantilla RPM fija chrome-sandbox a root y modo 4755', () => {

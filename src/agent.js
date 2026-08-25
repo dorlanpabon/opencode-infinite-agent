@@ -4,6 +4,8 @@ const server = require('./server');
 const { resolveSession, initialPrompt, resumePrompt } = require('./session');
 const { runLoop } = require('./loop');
 
+const FIRST_PROMPT_MARKER = /^<!-- opencode-infinite-agent-turn:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12} -->$/iu;
+
 function noop() {}
 
 function abortRemoteSession(req, session, options = {}) {
@@ -87,7 +89,7 @@ async function executeAgent(input, options = {}) {
       title: cfg.title || (input.prompt ? `loop: ${String(input.prompt).slice(0, 60)}` : undefined),
     });
     session = resolved.session;
-    if (options.onSession) options.onSession(session.id);
+    if (options.onSession) await options.onSession(session.id);
     logger.ok(`${resolved.created ? 'Sesion creada' : 'Sesion reanudada'}: ${session.id}`);
 
     if (cfg.autoApprove) {
@@ -104,6 +106,15 @@ async function executeAgent(input, options = {}) {
 
     const hasObjective = typeof input.prompt === 'string' && input.prompt.trim().length > 0;
     const resumeExisting = typeof input.resumeExisting === 'boolean' ? input.resumeExisting : !hasObjective;
+    const recoveryMode = ['new-objective', 'recover-first-prompt', 'continue'].includes(input.recoveryMode)
+      ? input.recoveryMode
+      : (hasObjective ? 'new-objective' : 'continue');
+    const firstPromptMarker = typeof input.firstPromptMarker === 'string' && FIRST_PROMPT_MARKER.test(input.firstPromptMarker)
+      ? input.firstPromptMarker
+      : null;
+    if (recoveryMode === 'recover-first-prompt' && firstPromptMarker === null) {
+      throw new TypeError('La recuperación del primer prompt requiere una marca durable válida');
+    }
     const firstPrompt = hasObjective
       ? initialPrompt(String(input.prompt), cfg.sentinel)
       : resumePrompt(cfg.sentinel);
@@ -117,7 +128,9 @@ async function executeAgent(input, options = {}) {
       eventStream,
       onState: options.onState,
       resumeExisting,
-      replaceObjective: resumeExisting && hasObjective,
+      replaceObjective: recoveryMode === 'new-objective' && resumeExisting && hasObjective,
+      recoverPromptMarker: recoveryMode === 'recover-first-prompt' ? firstPromptMarker : null,
+      firstPromptMarker,
       firstAttachments: hasObjective && Array.isArray(input.attachments) ? input.attachments : [],
       beforeFirstPrompt: options.beforeFirstPrompt,
     });
