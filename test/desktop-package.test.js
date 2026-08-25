@@ -36,7 +36,9 @@ test('renderer, puente y ventana Desktop conservan aislamiento estricto', async 
   assert.doesNotMatch(html.match(/id="auto-approve-input"[^>]*>/u)?.[0] ?? '', /\bchecked\b/u);
   assert.doesNotMatch(html.match(/id="task-input"[^>]*>/u)?.[0] ?? '', /\bmaxlength=/u);
   assert.match(html, /id="attachments-picker-button"/u);
-  assert.match(html, /id="model-input"[^>]*list="model-options"/u);
+  assert.match(html, /id="model-input"[^>]*role="combobox"[^>]*aria-controls="model-options"/u);
+  assert.match(html, /id="model-options"[^>]*role="listbox"[^>]*hidden/u);
+  assert.doesNotMatch(html, /<datalist\b/u);
   assert.match(html, /id="model-refresh-button"/u);
   assert.match(plugin, /OpenCodeInfiniteBridge/u);
   assert.match(plugin, /127\.0\.0\.1/u);
@@ -84,6 +86,9 @@ test('renderer conserva navegación y foco accesibles en sesiones', async () => 
   assert.match(renderer, /openOpenCodeProject/u);
   assert.match(renderer, /copyOpenCodeSessionLink/u);
   assert.match(renderer, /listModels/u);
+  assert.match(renderer, /moveActiveModelOption/u);
+  assert.match(renderer, /scrollIntoView\(\{ block: 'nearest' \}\)/u);
+  assert.match(renderer, /event\.pointerType === 'mouse'/u);
   assert.match(renderer, /No hay predeterminado global configurado/u);
   assert.match(renderer, /Predeterminado del proveedor/u);
   assert.match(renderer, /Vacío conserva la resolución nativa de OpenCode/u);
@@ -111,6 +116,7 @@ test('renderer conserva navegación y foco accesibles en sesiones', async () => 
   );
   assert.match(css, /\.session-item:focus/u);
   assert.match(css, /\.session-scroll\s*\{[^}]*overflow:\s*auto/su);
+  assert.match(css, /\.model-options\s*\{[^}]*max-height:[^;}]+;[^}]*overflow-y:\s*auto;[^}]*overscroll-behavior:\s*contain;/su);
   assert.match(css, /#sessions-view\s*\{[^}]*grid-template-rows:\s*auto minmax\(0, 1fr\)/su);
   assert.match(css, /\.app-shell\s*\{[^}]*grid-template-rows:\s*minmax\(0, 1fr\)/su);
   assert.match(css, /\.sidebar\s*\{[^}]*min-height:\s*0;[^}]*overflow:\s*hidden/su);

@@ -22,7 +22,7 @@ Los instaladores de cada versión están en [GitHub Releases](https://github.com
 | Debian/Ubuntu | x64 / ARM64 | `OpenCode-Infinite-*-linux-*.deb` |
 | Fedora/RHEL | x64 / ARM64 | `OpenCode-Infinite-*-linux-*.rpm` |
 
-La versión estable `2.6.1` se distribuye sin certificado comercial de Windows ni firma o notarización de Apple. SmartScreen o Gatekeeper pueden mostrar una advertencia. Comprueba siempre `SHA256SUMS.txt` antes de instalar.
+La versión estable `2.6.2` se distribuye sin certificado comercial de Windows ni firma o notarización de Apple. SmartScreen o Gatekeeper pueden mostrar una advertencia. Comprueba siempre `SHA256SUMS.txt` antes de instalar.
 
 Cada artefacto y `SHA256SUMS.txt` incluye procedencia firmada por GitHub/Sigstore. Puedes verificarla con `gh attestation verify <archivo> -R dorlanpabon/opencode-infinite-agent`; esto acredita el workflow y commit de origen, pero no reemplaza Authenticode ni la notarización de Apple.
 

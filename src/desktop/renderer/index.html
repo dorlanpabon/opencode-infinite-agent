@@ -289,15 +289,17 @@
               <div class="field-grid">
                 <label class="field"><span>Sesión o enlace de OpenCode</span><input id="session-input" type="text" maxlength="2048" spellcheck="false" placeholder="Pega oc://… para adoptar una sesión exacta"></label>
                 <label class="field"><span>Servidor manual (opcional)</span><input id="attach-input" type="url" maxlength="2048" spellcheck="false" placeholder="Vacío = OpenCode Desktop"></label>
-                <label class="field field--wide">
-                  <span>Modelo</span>
-                  <span class="picker">
-                    <input id="model-input" type="text" maxlength="512" list="model-options" autocomplete="off" spellcheck="false" aria-describedby="model-status" placeholder="Automático de OpenCode o proveedor/modelo">
+                <div class="field field--wide">
+                  <label class="field-label" for="model-input">Modelo</label>
+                  <div class="picker">
+                    <div class="model-combobox" id="model-combobox">
+                      <input id="model-input" type="text" maxlength="512" autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-controls="model-options" aria-expanded="false" aria-describedby="model-status" placeholder="Automático de OpenCode o proveedor/modelo">
+                      <ul class="model-options" id="model-options" role="listbox" aria-label="Modelos disponibles" hidden></ul>
+                    </div>
                     <button class="button button--secondary" id="model-refresh-button" type="button">Actualizar</button>
-                  </span>
+                  </div>
                   <small class="model-status" id="model-status">Carga el catálogo vivo para buscar y seleccionar un modelo.</small>
-                  <datalist id="model-options"></datalist>
-                </label>
+                </div>
                 <label class="field"><span>Agente</span><input id="agent-input" type="text" maxlength="256" spellcheck="false" placeholder="Predeterminado"></label>
                 <label class="field field--wide">
                   <span>Binario OpenCode</span>

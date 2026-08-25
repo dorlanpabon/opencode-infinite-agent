@@ -1,6 +1,6 @@
 {
   "name": "opencode-infinite-agent",
-  "version": "2.6.1",
+  "version": "2.6.2",
   "productName": "OpenCode Infinite",
   "description": "Event-driven desktop supervisor that continues OpenCode sessions until verified completion",
   "author": "dorlanpabon",

@@ -1428,6 +1428,7 @@ progress::-webkit-progress-value {
 }
 
 .field > span:first-child,
+.field > .field-label,
 .options legend {
   display: block;
   margin-bottom: 6px;
@@ -1495,6 +1496,88 @@ progress::-webkit-progress-value {
 
 .model-status[data-state="error"] {
   color: var(--red);
+}
+
+.model-combobox {
+  min-width: 0;
+  position: relative;
+}
+
+.model-combobox::after {
+  position: absolute;
+  top: 11px;
+  right: 11px;
+  color: var(--muted);
+  content: "\25BE";
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.model-combobox input {
+  padding-right: 30px;
+}
+
+.model-options {
+  max-height: min(260px, 32vh);
+  margin: 6px 0 0;
+  padding: 4px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #20211e;
+  box-shadow: 0 12px 28px rgb(0 0 0 / 28%);
+  list-style: none;
+  scrollbar-color: var(--line-strong) transparent;
+  scrollbar-width: thin;
+}
+
+.model-options[hidden] {
+  display: none;
+}
+
+.model-option {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(120px, 1fr);
+  gap: 12px;
+  min-width: 0;
+  padding: 7px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.model-option:hover,
+.model-option.is-active {
+  background: rgb(230 166 66 / 13%);
+}
+
+.model-option[aria-selected="true"] {
+  box-shadow: inset 2px 0 var(--amber-bright);
+}
+
+.model-option-id,
+.model-option-meta {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.model-option-id {
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.model-option-meta {
+  color: var(--muted);
+  font-size: 9px;
+  text-align: right;
+}
+
+.model-options-empty {
+  padding: 10px 8px;
+  color: var(--muted);
+  font-size: 10px;
 }
 
 .attachments-field {
