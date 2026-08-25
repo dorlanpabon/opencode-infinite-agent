@@ -15,8 +15,16 @@ export type RunStatus =
   | 'stopped'
   | 'failed';
 
+export interface RunAttachment {
+  path: string;
+  name: string;
+  mime: string;
+  size: number;
+}
+
 export interface StartRunInput {
   task: string;
+  attachments: RunAttachment[];
   workspace: string;
   name: string | null;
   sessionRef: string | null;
@@ -81,6 +89,7 @@ export interface RunState {
   runId: string;
   operationId: string;
   task: string;
+  attachments: RunAttachment[];
   workspace: string;
   name: string;
   sessionRef: string | null;
@@ -133,6 +142,8 @@ export interface DesktopApi {
   doctor(workspace: string | null, binary: string | null, attach: string | null): Promise<DoctorResult>;
   chooseWorkspace(): Promise<string | null>;
   chooseBinary(): Promise<string | null>;
+  chooseAttachments(): Promise<RunAttachment[]>;
+  resolveDroppedAttachments(files: File[]): Promise<RunAttachment[]>;
   listRuns(): Promise<RunState[]>;
   getRun(runId: string): Promise<RunState>;
   listSessions(input: SessionConnectionInput): Promise<OpenCodeSessionSummary[]>;
@@ -165,6 +176,28 @@ function normalizedOptional(value: string | null): string | null {
   if (value === null) return null;
   const trimmed = value.trim();
   return trimmed.length === 0 ? null : trimmed;
+}
+
+function parseAttachments(value: unknown): RunAttachment[] {
+  if (!Array.isArray(value) || value.length > 100) {
+    throw new TypeError('Adjuntos inválidos.');
+  }
+  return value.map((attachment) => {
+    const keys = ['mime', 'name', 'path', 'size'];
+    if (!isRecord(attachment) || !hasExactKeys(attachment, keys)
+      || typeof attachment.path !== 'string' || attachment.path.length === 0 || attachment.path.length > 32_767
+      || typeof attachment.name !== 'string' || attachment.name.length === 0 || attachment.name.length > 1_024
+      || typeof attachment.mime !== 'string' || attachment.mime.length === 0 || attachment.mime.length > 256
+      || !boundedNumber(attachment.size, 0, 20 * 1024 * 1024, true)) {
+      throw new TypeError('Adjuntos inválidos.');
+    }
+    return {
+      path: attachment.path,
+      name: attachment.name,
+      mime: attachment.mime,
+      size: attachment.size,
+    };
+  });
 }
 
 function assertRunId(value: unknown): asserts value is string {
@@ -210,11 +243,11 @@ export function parseDoctorInput(value: unknown): DoctorInput {
 
 export function parseStartRunInput(value: unknown): StartRunInput {
   const keys = [
-    'agent', 'attach', 'autoApprove', 'autoApproveConfirmation', 'binary', 'maxHours', 'maxIterations',
+    'agent', 'attach', 'attachments', 'autoApprove', 'autoApproveConfirmation', 'binary', 'maxHours', 'maxIterations',
     'model', 'name', 'resumeExisting', 'sentinel', 'sessionRef', 'stallMinutes', 'task', 'todoDetection', 'workspace',
   ];
   if (!isRecord(value) || !hasExactKeys(value, keys)
-    || typeof value.task !== 'string' || value.task.trim().length === 0 || value.task.length > 8_000
+    || typeof value.task !== 'string' || value.task.trim().length === 0
     || typeof value.workspace !== 'string' || value.workspace.trim().length === 0 || value.workspace.length > 32_767
     || !nullableBoundedString(value.name, 128)
     || !nullableBoundedString(value.sessionRef, 2_048)
@@ -245,6 +278,7 @@ export function parseStartRunInput(value: unknown): StartRunInput {
   }
   return {
     task: value.task.trim(),
+    attachments: parseAttachments(value.attachments),
     workspace: value.workspace.trim(),
     name: normalizedOptional(value.name),
     sessionRef,

@@ -1,12 +1,14 @@
 import type { DesktopApi, DesktopEvent } from './contracts.js';
 
-const { contextBridge, ipcRenderer } = require('electron') as typeof import('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron') as typeof import('electron');
 
 const CHANNELS = Object.freeze({
   systemInfo: 'system:info',
   doctor: 'system:doctor',
   chooseWorkspace: 'workspace:choose',
   chooseBinary: 'binary:choose',
+  chooseAttachments: 'attachments:choose',
+  resolveDroppedAttachments: 'attachments:resolve-dropped',
   listRuns: 'runs:list',
   getRun: 'runs:get',
   listSessions: 'sessions:list',
@@ -28,6 +30,11 @@ const api: DesktopApi = {
   doctor: (workspace, binary, attach) => ipcRenderer.invoke(CHANNELS.doctor, { workspace, binary, attach }),
   chooseWorkspace: () => ipcRenderer.invoke(CHANNELS.chooseWorkspace),
   chooseBinary: () => ipcRenderer.invoke(CHANNELS.chooseBinary),
+  chooseAttachments: () => ipcRenderer.invoke(CHANNELS.chooseAttachments),
+  resolveDroppedAttachments: (files) => ipcRenderer.invoke(
+    CHANNELS.resolveDroppedAttachments,
+    files.map((file) => webUtils.getPathForFile(file)).filter(Boolean),
+  ),
   listRuns: () => ipcRenderer.invoke(CHANNELS.listRuns),
   getRun: (runId) => ipcRenderer.invoke(CHANNELS.getRun, runId),
   listSessions: (input) => ipcRenderer.invoke(CHANNELS.listSessions, input),

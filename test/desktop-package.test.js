@@ -19,10 +19,13 @@ test('renderer y ventana Desktop conservan aislamiento estricto', async () => {
   assert.match(main, /sandbox:\s*true/u);
   assert.match(main, /setPermissionRequestHandler/u);
   assert.match(preload, /contextBridge\.exposeInMainWorld/u);
+  assert.match(preload, /webUtils\.getPathForFile/u);
   assert.doesNotMatch(renderer, /\.innerHTML\b|\beval\s*\(|setInterval\s*\(/u);
   assert.match(html, /Content-Security-Policy/u);
   assert.match(html, /id="auto-approve-input"[^>]*>/u);
   assert.doesNotMatch(html.match(/id="auto-approve-input"[^>]*>/u)?.[0] ?? '', /\bchecked\b/u);
+  assert.doesNotMatch(html.match(/id="task-input"[^>]*>/u)?.[0] ?? '', /\bmaxlength=/u);
+  assert.match(html, /id="attachments-picker-button"/u);
 });
 
 test('renderer conserva navegación y foco accesibles en sesiones', async () => {
@@ -34,6 +37,8 @@ test('renderer conserva navegación y foco accesibles en sesiones', async () => 
   assert.match(renderer, /sessionFocusFallback/u);
   assert.match(renderer, /Hay otra ejecución activa/u);
   assert.match(renderer, /aria-describedby/u);
+  assert.match(renderer, /Coloca el objetivo para activar/u);
+  assert.match(renderer, /resolveDroppedAttachments/u);
   assert.match(css, /\.session-item:focus/u);
 });
 

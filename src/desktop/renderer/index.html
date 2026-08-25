@@ -219,10 +219,27 @@
 
         <div class="dialog-body">
           <label class="field field--full" id="task-field">
-            <span>Tarea</span>
-            <textarea id="task-input" name="task" rows="5" maxlength="8000" required placeholder="Describe un resultado comprobable y cuándo debe considerarse terminado."></textarea>
-            <small><span>Se enviará a OpenCode.</span><span id="task-count">0 / 8000</span></small>
+            <span>Objetivo</span>
+            <textarea id="task-input" name="task" rows="5" required placeholder="Describe un resultado comprobable y cuándo debe considerarse terminado."></textarea>
+            <small><span>Se enviará a OpenCode.</span><span id="task-count">0 caracteres · sin límite de la app</span></small>
           </label>
+
+          <section class="attachments-field" id="attachments-field" aria-labelledby="attachments-title">
+            <header>
+              <span>
+                <strong id="attachments-title">Archivos adjuntos</strong>
+                <small>Se incluirán solo con el primer mensaje del objetivo.</small>
+              </span>
+              <button class="button button--secondary" id="attachments-picker-button" type="button">Adjuntar archivos…</button>
+            </header>
+            <div class="attachment-drop-zone" id="attachment-drop-zone" role="button" tabindex="0" aria-describedby="attachment-help">
+              <strong>Suelta archivos aquí</strong>
+              <span>o usa el selector nativo</span>
+            </div>
+            <p id="attachment-help">Texto, PNG, JPEG, GIF, WebP o PDF · selección múltiple · 20 MiB en total.</p>
+            <ul class="attachment-list" id="attachment-list" aria-label="Archivos adjuntos seleccionados"></ul>
+            <p class="attachment-empty" id="attachment-empty">No hay archivos adjuntos.</p>
+          </section>
 
           <div class="field-grid" id="identity-fields">
             <label class="field field--wide">

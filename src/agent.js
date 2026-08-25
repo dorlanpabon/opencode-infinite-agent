@@ -102,7 +102,9 @@ async function executeAgent(input, options = {}) {
       });
     }
 
-    const firstPrompt = input.prompt
+    const hasObjective = typeof input.prompt === 'string' && input.prompt.trim().length > 0;
+    const resumeExisting = typeof input.resumeExisting === 'boolean' ? input.resumeExisting : !hasObjective;
+    const firstPrompt = hasObjective
       ? initialPrompt(String(input.prompt), cfg.sentinel)
       : resumePrompt(cfg.sentinel);
     const result = await runLoop({
@@ -114,7 +116,10 @@ async function executeAgent(input, options = {}) {
       log: logger,
       eventStream,
       onState: options.onState,
-      resumeExisting: !input.prompt,
+      resumeExisting,
+      replaceObjective: resumeExisting && hasObjective,
+      firstAttachments: hasObjective && Array.isArray(input.attachments) ? input.attachments : [],
+      beforeFirstPrompt: options.beforeFirstPrompt,
     });
     return { ...result, sessionId: session.id, serverBase: handle.base, ownedServer: handle.owned };
   } finally {
