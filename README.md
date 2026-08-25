@@ -22,7 +22,7 @@ Los instaladores de cada versión están en [GitHub Releases](https://github.com
 | Debian/Ubuntu | x64 / ARM64 | `OpenCode-Infinite-*-linux-*.deb` |
 | Fedora/RHEL | x64 / ARM64 | `OpenCode-Infinite-*-linux-*.rpm` |
 
-Cada release incluye `SHA256SUMS.txt`. Las versiones preliminares no están firmadas ni notarizadas; Windows SmartScreen o macOS Gatekeeper pueden mostrar una advertencia.
+La versión estable `2.4.0` se distribuye sin certificado comercial de Windows ni firma o notarización de Apple. SmartScreen o Gatekeeper pueden mostrar una advertencia. Comprueba siempre `SHA256SUMS.txt` antes de instalar.
 
 ## Requisitos
 
@@ -36,11 +36,13 @@ La aplicación se integra con el proceso propietario de OpenCode Desktop mediant
 
 1. Abre primero **OpenCode Desktop** y luego **OpenCode Infinite**.
 2. En **Sesiones**, pulsa **Conectar OpenCode Desktop**. La primera vez se instalará la integración local y se pedirá reiniciar OpenCode Desktop una sola vez.
-3. Puedes pegar un enlace `oc://…/session/ses_…` para localizar una sesión exacta, incluso si pertenece a otro workspace.
+3. Puedes pegar un enlace interno exacto `oc://renderer/server/c2lkZWNhcg/session/ses_…` para localizar una sesión, incluso si pertenece a otro workspace.
 4. Activa **Continuar hasta terminar**, coloca el objetivo sin un límite artificial de caracteres y adjunta los archivos necesarios.
 5. Para una tarea nueva, usa **Nueva ejecución**, elige el workspace y pulsa **Iniciar supervisor**.
 
 La interfaz muestra el ciclo del turno, estado del stream, sesión, iteración, consumo, historial y logs. Solo permite una ejecución activa por instancia y conserva el estado de forma atómica para recuperarse tras un cierre. Las tareas nuevas usan un servidor dedicado; las sesiones existentes continúan dentro del sidecar que realmente las posee.
+
+OpenCode publica únicamente `opencode://open-project?directory=...` para abrir un workspace desde el sistema operativo; **Abrir proyecto en OpenCode** usa ese protocolo. El enlace `oc://renderer/server/c2lkZWNhcg/session/<ses_id>` pertenece al renderer interno de OpenCode Desktop: OpenCode Infinite permite copiarlo o pegarlo para identificar una sesión exacta, pero nunca intenta lanzarlo como protocolo del sistema operativo.
 
 La autoaprobación de permisos está desactivada por defecto y exige una confirmación explícita para tareas nuevas. En sesiones existentes de OpenCode Desktop, los permisos siempre se confirman dentro de OpenCode.
 
@@ -81,7 +83,7 @@ Reanudar una sesión:
 
 ```powershell
 node bin/loop-agent.js --session ses_xxxxxxxx --dir "D:\proyecto"
-node bin/loop-agent.js --deeplink "oc://renderer/server/.../session/ses_xxxxxxxx" --dir "D:\proyecto"
+node bin/loop-agent.js --deeplink "oc://renderer/server/c2lkZWNhcg/session/ses_xxxxxxxx" --dir "D:\proyecto"
 ```
 
 Opciones relevantes:
