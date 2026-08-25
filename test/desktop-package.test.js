@@ -61,7 +61,7 @@ test('renderer conserva navegación y foco accesibles en sesiones', async () => 
   assert.match(renderer, /listModels/u);
   assert.match(renderer, /No hay predeterminado global configurado/u);
   assert.match(renderer, /Predeterminado del proveedor/u);
-  assert.match(renderer, /Vacío conserva el modelo actual de la sesión/u);
+  assert.match(renderer, /Vacío conserva la resolución nativa de OpenCode/u);
   assert.match(renderer, /Abrir proyecto en OpenCode/u);
   assert.match(renderer, /Copiar enlace interno/u);
   assert.match(rendererSource, /function workspaceBasename\(workspace: string\)/u);
@@ -87,6 +87,8 @@ test('renderer conserva navegación y foco accesibles en sesiones', async () => 
   assert.match(css, /\.session-item:focus/u);
   assert.match(css, /\.session-scroll\s*\{[^}]*overflow:\s*auto/su);
   assert.match(css, /#sessions-view\s*\{[^}]*grid-template-rows:\s*auto minmax\(0, 1fr\)/su);
+  assert.match(css, /\.app-shell\s*\{[^}]*grid-template-rows:\s*minmax\(0, 1fr\)/su);
+  assert.match(css, /\.sidebar\s*\{[^}]*min-height:\s*0;[^}]*overflow:\s*hidden/su);
 });
 
 test('paquete Electron usa allowlist y makers multiplataforma', () => {

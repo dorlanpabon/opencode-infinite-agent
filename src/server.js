@@ -3,6 +3,7 @@ const os = require('os');
 const path = require('path');
 const { execSync, spawn } = require('child_process');
 const { createServer } = require('net');
+const { safeText } = require('./safe-text');
 
 const desktopBridgeAuth = new Map();
 
@@ -115,7 +116,8 @@ async function request(base, method, pathName, body, {
       try { data = JSON.parse(text); } catch { data = text; }
     }
     if (!res.ok) {
-      const detail = typeof data === 'string' ? data.slice(0, 300) : JSON.stringify(data)?.slice(0, 300);
+      const rawDetail = typeof data === 'string' ? data : JSON.stringify(data);
+      const detail = safeText(rawDetail ?? '', 300);
       const err = new Error(`HTTP ${res.status} en ${method} ${pathName}: ${detail || '(sin cuerpo)'}`);
       err.status = res.status;
       throw err;

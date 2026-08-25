@@ -767,7 +767,7 @@ function renderModelCatalog(catalog: OpenCodeModelCatalog): void {
   const providerCount = new Set(catalog.models.map((model) => model.providerId)).size;
   const scope = `${catalog.models.length} modelos de ${providerCount} proveedores`;
   if (dialogMode === 'activate') {
-    ui.modelStatus.textContent = `${scope}. Vacío conserva el modelo actual de la sesión; selecciona uno para cambiarlo.`;
+    ui.modelStatus.textContent = `${scope}. Vacío conserva la resolución nativa de OpenCode (agente o sesión); selecciona uno para cambiarla.`;
     ui.modelStatus.dataset.state = 'ready';
   } else if (configuredAvailable) {
     ui.modelStatus.textContent = `${scope}. Predeterminado global configurado: ${configured}.`;

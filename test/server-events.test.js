@@ -115,6 +115,26 @@ test('request enruta el workspace como el SDK oficial', async () => {
   assert.equal(calls[1].options.headers['x-opencode-directory'], encodeURIComponent(transportedDirectory));
 });
 
+test('request redacta credenciales del cuerpo de errores HTTP', async () => {
+  const secrets = ['model-api-secret', 'bearer-secret', 'url-user', 'url-password'];
+  const fetchImpl = async () => new Response(JSON.stringify({
+    apiKey: secrets[0],
+    authorization: `Bearer ${secrets[1]}`,
+    endpoint: `https://${secrets[2]}:${secrets[3]}@example.test/v1`,
+  }), { status: 500, headers: { 'content-type': 'application/json' } });
+
+  await assert.rejects(
+    () => request('http://127.0.0.1:4096', 'GET', '/provider', null, { fetchImpl }),
+    (error) => {
+      assert.equal(error.status, 500);
+      assert.match(error.message, /HTTP 500 en GET \/provider/u);
+      assert.match(error.message, /\[REDACTED\]/u);
+      for (const secret of secrets) assert.equal(error.message.includes(secret), false);
+      return true;
+    },
+  );
+});
+
 test('SSE vence una conexion muda, cancela el lector y reconecta con workspace', async () => {
   const calls = [];
   let cancels = 0;
