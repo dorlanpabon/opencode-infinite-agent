@@ -553,6 +553,45 @@ test('un error no reintentable del proveedor detiene el ciclo tras el primer tur
   assert.equal(api.state.prompts.length, 1);
 });
 
+test('un error terminal del proveedor redacta secretos antes de logs y estado', async () => {
+  const sessionId = 'ses_provider_secret';
+  const stream = fakeEventStream();
+  const api = harness(sessionId, stream);
+  const log = logger();
+  const stateEvents = [];
+  const secrets = ['provider-token-raw', 'provider-api-key-raw', 'provider-auth-raw', 'url-user', 'url-password'];
+  const message = 'token=provider-token-raw api_key=provider-api-key-raw '
+    + 'Authorization: Bearer provider-auth-raw https://url-user:url-password@example.test/v1';
+  const run = runLoop({
+    req: api.req,
+    sessionId,
+    cfg: cfg({ maxIterations: 8, maxConsecutiveErrors: 5 }),
+    firstPrompt: 'provider secret task',
+    flag: { aborted: false, signal: new AbortController().signal },
+    log,
+    eventStream: stream,
+    onState: (event) => stateEvents.push(event),
+  });
+
+  await waitFor(() => api.state.prompts.length === 1);
+  const reply = assistant('msg_provider_secret', sessionId, message, true, api.state.promptIds[0]);
+  reply.info.error = {
+    name: 'APIError',
+    data: { message, statusCode: 402, isRetryable: false },
+  };
+  api.state.messages.push(reply);
+  api.state.status = {};
+  stream.emit({ type: 'message.updated', properties: { info: reply.info } });
+  stream.emit({ type: 'session.idle', properties: { sessionID: sessionId } });
+
+  const result = await run;
+  const exposed = JSON.stringify({ logs: log.lines, result, stateEvents });
+  assert.equal(result.status, 'error');
+  assert.match(result.reason, /APIError 402/);
+  assert.match(exposed, /\[REDACTED\]/u);
+  for (const secret of secrets) assert.equal(exposed.includes(secret), false, secret);
+});
+
 test('error de transporte ambiguo espera el turno aceptado sin duplicarlo', async () => {
   const sessionId = 'ses_ambiguous';
   const stream = fakeEventStream();

@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { randomUUID } = require('node:crypto');
-const { mkdtemp, mkdir, rm, writeFile } = require('node:fs/promises');
+const { mkdtemp, mkdir, readFile, rm, writeFile } = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
@@ -16,10 +16,46 @@ function input(workspace) {
 }
 
 test('safeText elimina credenciales comunes de logs y errores', () => {
-  const value = safeText('Authorization: Bearer abc.def.ghi api_key=visible sk-1234567890abcdefghijklmnop');
+  const value = safeText('Authorization: Bearer abc.def.ghi api_key=visible sk-1234567890abcdefghijklmnop https://url-user:url-password@example.test/v1');
   assert.equal(value.includes('abc.def.ghi'), false);
   assert.equal(value.includes('visible'), false);
   assert.equal(value.includes('sk-1234567890abcdefghijklmnop'), false);
+  assert.equal(value.includes('url-user'), false);
+  assert.equal(value.includes('url-password'), false);
+});
+
+test('RunManager no persiste secretos reportados por el motor', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'opencode-infinite-redaction-'));
+  const workspace = path.join(root, 'workspace');
+  await mkdir(workspace);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const message = 'token=run-token-raw api_key=run-api-key-raw Authorization: Bearer run-auth-raw '
+    + 'https://run-user:run-password@example.test/v1';
+  const secrets = ['run-token-raw', 'run-api-key-raw', 'run-auth-raw', 'run-user', 'run-password'];
+  const adapter = {
+    doctor: async () => ({ ok: true, engineAvailable: true, workspaceReady: true, binaryReady: null,
+      attachReady: null, mode: 'dedicated', serverVersion: null, endpoint: null, warnings: [] }),
+    run: async (_input, context) => {
+      await context.emit({ type: 'log', level: 'warn', message });
+      await context.emit({ type: 'progress', iteration: 1, lastMessage: message });
+      return { status: 'failed', reason: message, iteration: 1, lastMessage: message };
+    },
+  };
+  const events = [];
+  let finish;
+  const finished = new Promise((resolve) => { finish = resolve; });
+  const manager = new RunManager((event) => {
+    events.push(event);
+    if (event.type === 'operation-finished') finish(event.run);
+  }, root, adapter);
+  await manager.initialize();
+  const receipt = await manager.start(input(workspace));
+  const final = await finished;
+  const persisted = await readFile(path.join(root, 'runs', `${receipt.runId}.json`), 'utf8');
+  const exposed = JSON.stringify({ events, final, persisted });
+  assert.equal(final.status, 'failed');
+  assert.match(exposed, /\[REDACTED\]/u);
+  for (const secret of secrets) assert.equal(exposed.includes(secret), false, secret);
 });
 
 test('RunManager migra historial schema 1 sin adjuntos', async (t) => {

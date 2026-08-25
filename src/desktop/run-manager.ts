@@ -17,6 +17,12 @@ import type {
   StartRunInput,
 } from './contracts.js';
 
+const { safeText } = require('../safe-text.js') as {
+  safeText(value: unknown, maximum?: number): string;
+};
+
+export { safeText };
+
 const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const ACTIVE_STATUSES = new Set<RunStatus>([
   'initializing', 'connecting', 'working', 'retrying', 'settling', 'continuing', 'stopping',
@@ -143,16 +149,6 @@ function isRunState(value: unknown): value is RunState {
     && validDate(value.createdAt) && validDate(value.updatedAt)
     && (value.completedAt === null || validDate(value.completedAt))
     && nullableString(value.lastError, 4_000);
-}
-
-export function safeText(value: unknown, maximum = 4_000): string {
-  const text = value instanceof Error ? value.message : String(value);
-  return text
-    .replace(/\u001B\[[0-?]*[ -/]*[@-~]/gu, '')
-    .replace(/(authorization\s*:\s*(?:basic|bearer)\s+)[^\s,;]+/giu, '$1[REDACTED]')
-    .replace(/((?:password|token|secret|api[_-]?key)\s*[=:]\s*)[^\s,;]+/giu, '$1[REDACTED]')
-    .replace(/\b(?:sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16})\b/gu, '[REDACTED]')
-    .slice(0, maximum);
 }
 
 function operationError(error: unknown): { code: string; message: string } {
