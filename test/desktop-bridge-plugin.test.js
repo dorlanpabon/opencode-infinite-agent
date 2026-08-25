@@ -21,6 +21,23 @@ test('plugin Desktop expone solo la API autenticada necesaria del SDK propietari
   const client = {
     _client: {
       async get(options) {
+        if (options.url === '/provider') {
+          calls.push(['providers', options]);
+          return ok({
+            all: [{
+              id: 'openai', name: 'OpenAI', models: {
+                'gpt-5.4': { id: 'gpt-5.4', name: 'GPT-5.4' },
+                legacy: { id: 'legacy', name: 'Legacy', status: 'deprecated' },
+              },
+            }],
+            connected: ['openai'],
+            default: { openai: 'gpt-5.4' },
+          });
+        }
+        if (options.url === '/config') {
+          calls.push(['config', options]);
+          return ok({ model: null, provider: { openai: { options: { apiKey: 'must-not-cross-bridge' } } } });
+        }
         calls.push(['globalList', options]);
         if (options.query.cursor === undefined) {
           return {
@@ -83,6 +100,22 @@ test('plugin Desktop expone solo la API autenticada necesaria del SDK propietari
   ]);
   assert.equal(calls.filter(([name]) => name === 'globalList').length, 2);
   assert.equal(calls.some(([name]) => name === 'list'), false);
+
+  const models = await fetch(`${descriptor.endpoint}/models?directory=${encodeURIComponent(workspace)}`, { headers })
+    .then((response) => response.json());
+  assert.deepEqual(models, {
+    models: [{
+      id: 'openai/gpt-5.4',
+      providerId: 'openai',
+      providerName: 'OpenAI',
+      modelId: 'gpt-5.4',
+      name: 'GPT-5.4',
+      providerDefault: true,
+    }],
+    configuredModel: null,
+  });
+  assert.equal(JSON.stringify(models).includes('must-not-cross-bridge'), false);
+  assert.equal(calls.find(([name]) => name === 'providers')[1].query.directory, workspace);
 
   const objective = 'x'.repeat(100_000);
   const prompt = await fetch(`${descriptor.endpoint}/session/ses_real1/prompt_async`, {

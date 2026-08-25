@@ -74,6 +74,20 @@ export interface OpenCodeSessionSummary {
   runId: string | null;
 }
 
+export interface OpenCodeModelSummary {
+  id: string;
+  providerId: string;
+  providerName: string;
+  modelId: string;
+  name: string;
+  providerDefault: boolean;
+}
+
+export interface OpenCodeModelCatalog {
+  models: OpenCodeModelSummary[];
+  configuredModel: string | null;
+}
+
 export type SetContinuousInput =
   | { enabled: false; sessionId: string; run: null }
   | { enabled: true; sessionId: string; run: StartRunInput };
@@ -159,6 +173,7 @@ export interface DesktopApi {
   listRuns(): Promise<RunState[]>;
   getRun(runId: string): Promise<RunState>;
   listSessions(input: SessionConnectionInput): Promise<OpenCodeSessionSummary[]>;
+  listModels(input: SessionConnectionInput): Promise<OpenCodeModelCatalog>;
   openOpenCodeProject(workspace: string): Promise<void>;
   copyOpenCodeSessionLink(sessionId: string): Promise<void>;
   setContinuous(input: SetContinuousInput): Promise<OperationReceipt>;

@@ -46,6 +46,7 @@ const CHANNELS = {
   listRuns: 'runs:list',
   getRun: 'runs:get',
   listSessions: 'sessions:list',
+  listModels: 'models:list',
   openOpenCodeProject: 'sessions:open-project',
   copyOpenCodeSessionLink: 'sessions:copy-internal-link',
   setContinuous: 'sessions:set-continuous',
@@ -239,6 +240,12 @@ function registerHandlers(): void {
     const input = parseSessionConnectionInput(raw);
     await assertConnectionPaths(input);
     return manager().listSessions(input);
+  });
+  ipcMain.handle(CHANNELS.listModels, async (event, raw: unknown) => {
+    assertTrustedSender(event);
+    const input = parseSessionConnectionInput(raw);
+    await assertConnectionPaths(input);
+    return manager().listModels(input);
   });
   ipcMain.handle(CHANNELS.openOpenCodeProject, async (event, raw: unknown) => {
     assertTrustedSender(event);

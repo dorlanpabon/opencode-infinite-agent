@@ -47,6 +47,12 @@ function harness() {
       calls.push({ method, pathname });
       if (pathname === '/session') return state.sessions;
       if (pathname === '/session/status') return state.statuses;
+      if (pathname === '/provider') return {
+        all: [{ id: 'openai', name: 'OpenAI', models: { 'gpt-5.4': { id: 'gpt-5.4', name: 'GPT-5.4' } } }],
+        connected: ['openai'],
+        default: { openai: 'gpt-5.4' },
+      };
+      if (pathname === '/config') return { model: 'openai/gpt-5.4' };
       throw new Error(`unexpected ${method} ${pathname}`);
     },
     startEventStream: () => stream,
@@ -70,6 +76,9 @@ test('catálogo combina sesiones/status y reconcilia por SSE sin escrituras ni p
   assert.deepEqual(api.calls.map((call) => `${call.method} ${call.pathname}`), [
     'GET /session', 'GET /session/status',
   ]);
+  const models = await catalog.models();
+  assert.equal(models.configuredModel, 'openai/gpt-5.4');
+  assert.equal(models.models[0].providerDefault, true);
 
   api.state.statuses = {};
   api.stream.emit({ type: 'session.idle', properties: { sessionID: 'ses_active1' } });

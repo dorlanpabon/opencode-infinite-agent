@@ -3,6 +3,7 @@ import type {
   DesktopEvent,
   DoctorResult,
   LogLevel,
+  OpenCodeModelCatalog,
   OpenCodeSessionSummary,
   RunAttachment,
   RunState,
@@ -151,6 +152,9 @@ const ui = {
   sessionInput: element<HTMLInputElement>('session-input'),
   attachInput: element<HTMLInputElement>('attach-input'),
   modelInput: element<HTMLInputElement>('model-input'),
+  modelOptions: element<HTMLDataListElement>('model-options'),
+  modelRefreshButton: element<HTMLButtonElement>('model-refresh-button'),
+  modelStatus: element<HTMLElement>('model-status'),
   agentInput: element<HTMLInputElement>('agent-input'),
   binaryInput: element<HTMLInputElement>('binary-input'),
   binaryPickerButton: element<HTMLButtonElement>('binary-picker-button'),
@@ -175,6 +179,9 @@ let selectedRunId: string | null = null;
 let logs: LogEntry[] = [];
 let doctorResult: DoctorResult | null = null;
 let sessionConnection: SessionConnectionInput | null = null;
+let modelCatalog: OpenCodeModelCatalog | null = null;
+let modelCatalogKey: string | null = null;
+let modelRequestId = 0;
 let dialogMode: 'new' | 'connect' | 'activate' = 'new';
 let activationTarget: OpenCodeSessionSummary | null = null;
 let selectedAttachments: RunAttachment[] = [];
@@ -727,6 +734,91 @@ function applyDialogConnection(): void {
   ui.attachInput.value = attach ?? '';
 }
 
+function modelConnectionInput(): SessionConnectionInput {
+  return {
+    workspace: ui.workspaceInput.value.trim(),
+    binary: ui.binaryInput.value.trim() || null,
+    attach: ui.attachInput.value.trim() || null,
+    sessionRef: null,
+  };
+}
+
+function connectionModelKey(input: SessionConnectionInput): string {
+  return JSON.stringify([input.workspace, input.binary, input.attach]);
+}
+
+function renderModelCatalog(catalog: OpenCodeModelCatalog): void {
+  const previous = ui.modelInput.value;
+  const fragment = document.createDocumentFragment();
+  for (const model of catalog.models) {
+    const option = document.createElement('option');
+    option.value = model.id;
+    option.label = `${model.name} · ${model.providerName}${model.providerDefault ? ' · Predeterminado del proveedor' : ''}`;
+    fragment.append(option);
+  }
+  ui.modelOptions.replaceChildren(fragment);
+  const configured = catalog.configuredModel;
+  const configuredAvailable = configured !== null && catalog.models.some((model) => model.id === configured);
+  if (previous) {
+    ui.modelInput.value = previous;
+  } else if (dialogMode === 'new' && configuredAvailable) {
+    ui.modelInput.value = configured;
+  }
+  const providerCount = new Set(catalog.models.map((model) => model.providerId)).size;
+  const scope = `${catalog.models.length} modelos de ${providerCount} proveedores`;
+  if (dialogMode === 'activate') {
+    ui.modelStatus.textContent = `${scope}. Vacío conserva el modelo actual de la sesión; selecciona uno para cambiarlo.`;
+    ui.modelStatus.dataset.state = 'ready';
+  } else if (configuredAvailable) {
+    ui.modelStatus.textContent = `${scope}. Predeterminado global configurado: ${configured}.`;
+    ui.modelStatus.dataset.state = 'ready';
+  } else if (configured) {
+    ui.modelStatus.textContent = `${scope}. El predeterminado configurado (${configured}) no está disponible; selecciona otro modelo.`;
+    ui.modelStatus.dataset.state = 'warning';
+  } else {
+    ui.modelStatus.textContent = `${scope}. No hay predeterminado global configurado; vacío deja que OpenCode elija automáticamente. Los predeterminados indicados son por proveedor.`;
+    ui.modelStatus.dataset.state = 'ready';
+  }
+}
+
+async function loadModels(input = modelConnectionInput(), showToast = false): Promise<void> {
+  if (!input.workspace) {
+    ui.modelStatus.textContent = 'Selecciona un workspace para cargar el catálogo vivo de modelos.';
+    ui.modelStatus.dataset.state = 'idle';
+    return;
+  }
+  const key = connectionModelKey(input);
+  if (modelCatalog && modelCatalogKey === key) {
+    renderModelCatalog(modelCatalog);
+    return;
+  }
+  const requestId = ++modelRequestId;
+  ui.modelRefreshButton.disabled = true;
+  ui.modelRefreshButton.textContent = 'Cargando…';
+  ui.modelStatus.textContent = 'Consultando modelos disponibles en OpenCode…';
+  ui.modelStatus.dataset.state = 'loading';
+  try {
+    const catalog = await api.listModels(input);
+    if (requestId !== modelRequestId) return;
+    modelCatalog = catalog;
+    modelCatalogKey = key;
+    renderModelCatalog(catalog);
+    if (showToast) toast(`${catalog.models.length} modelos disponibles.`);
+  } catch (error) {
+    if (requestId !== modelRequestId) return;
+    const message = errorText(error);
+    ui.modelStatus.textContent = `No se pudo cargar el catálogo: ${message} Puedes escribir proveedor/modelo manualmente y reintentar.`;
+    ui.modelStatus.dataset.state = 'error';
+    appendLog('warn', `Modelos: ${message}`);
+    if (showToast) toast(message, true);
+  } finally {
+    if (requestId === modelRequestId) {
+      ui.modelRefreshButton.disabled = false;
+      ui.modelRefreshButton.textContent = 'Actualizar';
+    }
+  }
+}
+
 function updateTaskCount(): void {
   ui.taskCount.textContent = `${formatInteger(ui.taskInput.value.length)} caracteres · sin límite de la app`;
 }
@@ -765,6 +857,7 @@ function openRunDialog(target: OpenCodeSessionSummary | null = null): void {
   updateAutoApprove();
   setFormError(null);
   if (!ui.runDialog.open) ui.runDialog.showModal();
+  void loadModels(modelConnectionInput()).catch(() => undefined);
   window.setTimeout(() => ui.taskInput.focus(), 0);
 }
 
@@ -834,6 +927,7 @@ async function loadSessions(input: SessionConnectionInput, showToast = true): Pr
       ? 'Servidor manual conectado · Cambiar…'
       : 'OpenCode Desktop conectado · Cambiar…';
     render();
+    void loadModels({ ...input, sessionRef: null }).catch(() => undefined);
     if (showToast) toast(`${next.length} sesiones cargadas.`);
   } finally {
     ui.sessionList.setAttribute('aria-busy', 'false');
@@ -908,6 +1002,8 @@ async function chooseWorkspace(): Promise<void> {
     const workspace = await api.chooseWorkspace();
     if (workspace) {
       ui.workspaceInput.value = workspace;
+      modelCatalogKey = null;
+      void loadModels(modelConnectionInput()).catch(() => undefined);
       announce('Workspace seleccionado.');
     }
   } catch (error) {
@@ -923,6 +1019,8 @@ async function chooseBinary(): Promise<void> {
     const binary = await api.chooseBinary();
     if (binary) {
       ui.binaryInput.value = binary;
+      modelCatalogKey = null;
+      void loadModels(modelConnectionInput()).catch(() => undefined);
       announce('Binario OpenCode seleccionado.');
     }
   } catch (error) {
@@ -1075,6 +1173,22 @@ function wireEvents(): () => void {
   ui.taskInput.addEventListener('input', updateTaskCount);
   ui.workspacePickerButton.addEventListener('click', () => { void chooseWorkspace(); });
   ui.binaryPickerButton.addEventListener('click', () => { void chooseBinary(); });
+  ui.modelRefreshButton.addEventListener('click', () => {
+    modelCatalogKey = null;
+    void loadModels(modelConnectionInput(), true);
+  });
+  ui.workspaceInput.addEventListener('change', () => {
+    modelCatalogKey = null;
+    void loadModels(modelConnectionInput());
+  });
+  ui.attachInput.addEventListener('change', () => {
+    modelCatalogKey = null;
+    void loadModels(modelConnectionInput());
+  });
+  ui.binaryInput.addEventListener('change', () => {
+    modelCatalogKey = null;
+    void loadModels(modelConnectionInput());
+  });
   ui.attachmentsPickerButton.addEventListener('click', () => { void chooseAttachments(); });
   ui.attachmentDropZone.addEventListener('click', () => { void chooseAttachments(); });
   ui.attachmentDropZone.addEventListener('keydown', (event) => {

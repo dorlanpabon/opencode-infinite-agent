@@ -24,6 +24,7 @@ test('renderer, puente y ventana Desktop conservan aislamiento estricto', async 
   assert.match(preload, /webUtils\.getPathForFile/u);
   assert.match(preload, /sessions:open-project/u);
   assert.match(preload, /sessions:copy-internal-link/u);
+  assert.match(preload, /models:list/u);
   assert.doesNotMatch(preload, /openExternal/u);
   assert.match(mainSource, /shell\.openExternal\(buildOpenCodeProjectUrl\(input\.workspace\)\)/u);
   assert.match(mainSource, /clipboard\.writeText\(buildOpenCodeInternalSessionLink\(input\.sessionId\)\)/u);
@@ -33,6 +34,8 @@ test('renderer, puente y ventana Desktop conservan aislamiento estricto', async 
   assert.doesNotMatch(html.match(/id="auto-approve-input"[^>]*>/u)?.[0] ?? '', /\bchecked\b/u);
   assert.doesNotMatch(html.match(/id="task-input"[^>]*>/u)?.[0] ?? '', /\bmaxlength=/u);
   assert.match(html, /id="attachments-picker-button"/u);
+  assert.match(html, /id="model-input"[^>]*list="model-options"/u);
+  assert.match(html, /id="model-refresh-button"/u);
   assert.match(plugin, /OpenCodeInfiniteBridge/u);
   assert.match(plugin, /127\.0\.0\.1/u);
   assert.match(plugin, /timingSafeEqual/u);
@@ -55,6 +58,10 @@ test('renderer conserva navegación y foco accesibles en sesiones', async () => 
   assert.match(renderer, /resolveDroppedAttachments/u);
   assert.match(renderer, /openOpenCodeProject/u);
   assert.match(renderer, /copyOpenCodeSessionLink/u);
+  assert.match(renderer, /listModels/u);
+  assert.match(renderer, /No hay predeterminado global configurado/u);
+  assert.match(renderer, /Predeterminado del proveedor/u);
+  assert.match(renderer, /Vacío conserva el modelo actual de la sesión/u);
   assert.match(renderer, /Abrir proyecto en OpenCode/u);
   assert.match(renderer, /Copiar enlace interno/u);
   assert.match(rendererSource, /function workspaceBasename\(workspace: string\)/u);
@@ -71,12 +78,15 @@ test('renderer conserva navegación y foco accesibles en sesiones', async () => 
   assert.match(rendererSource, /ui\.inspectOpenProjectButton\.disabled = !trustedDesktopSession/u);
   assert.match(html, /id="inspect-open-project-button"/u);
   assert.match(html, /id="inspect-copy-session-link-button"/u);
+  assert.match(html, /class="session-scroll" tabindex="0" role="region"/u);
   assert.match(
     rendererSource,
     /if \(dialogMode === 'connect'\) \{\s*await loadSessions\(connectionInput\(\)\);\s*closeRunDialog\(\);/u,
     'el modal solo puede cerrarse después de que el catálogo conecte correctamente',
   );
   assert.match(css, /\.session-item:focus/u);
+  assert.match(css, /\.session-scroll\s*\{[^}]*overflow:\s*auto/su);
+  assert.match(css, /#sessions-view\s*\{[^}]*grid-template-rows:\s*auto minmax\(0, 1fr\)/su);
 });
 
 test('paquete Electron usa allowlist y makers multiplataforma', () => {
