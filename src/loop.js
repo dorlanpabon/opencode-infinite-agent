@@ -2,6 +2,7 @@ const { randomUUID } = require('node:crypto');
 const { pathToFileURL } = require('node:url');
 const { assistantText, hasSentinel, todosDone, excerpt, messageError, usageOf } = require('./detect');
 const { continuationPrompt } = require('./session');
+const { safeText } = require('./safe-text');
 const {
   createSessionTurnMonitor,
   terminalMessageIds,
@@ -76,6 +77,38 @@ function isRunningStatus(status) {
 function isConfirmedPromptRejection(error) {
   const status = error && Number(error.status);
   return Number.isInteger(status) && status >= 400 && status < 500 && ![408, 425, 429].includes(status);
+}
+
+function agentErrorDetails(error) {
+  const value = error && typeof error === 'object' ? error : {};
+  const data = value.data && typeof value.data === 'object' ? value.data : {};
+  const rawStatus = data.statusCode ?? value.statusCode ?? value.status;
+  const status = rawStatus === null || rawStatus === undefined || rawStatus === '' ? Number.NaN : Number(rawStatus);
+  const rawMessage = data.message ?? value.message;
+  return {
+    name: typeof value.name === 'string' && value.name ? safeText(value.name, 80) : 'AgentError',
+    message: typeof rawMessage === 'string'
+      ? safeText(rawMessage.replace(/[\r\n\t]+/gu, ' ').trim(), 240)
+      : '',
+    retryable: typeof data.isRetryable === 'boolean'
+      ? data.isRetryable
+      : (typeof value.isRetryable === 'boolean' ? value.isRetryable : null),
+    status: Number.isInteger(status) ? status : null,
+  };
+}
+
+function nonRetryableAgentError(error) {
+  const details = agentErrorDetails(error);
+  return details.retryable === false
+    || (details.status !== null && details.status >= 400 && details.status < 500
+      && ![408, 425, 429].includes(details.status));
+}
+
+function agentErrorSummary(error) {
+  const details = agentErrorDetails(error);
+  const status = details.status === null ? '' : ` ${details.status}`;
+  const message = details.message ? `: ${details.message}` : '';
+  return `${details.name}${status}${message}`;
 }
 
 // Arma el monitor antes de prompt_async. Los eventos solo despiertan una
@@ -154,7 +187,7 @@ async function exchange(req, sessionId, text, cfg, flag, monitor, log, {
         signal: flag.signal,
       });
       log.info(`Sesion ${before.status.type}: esperando el turno sin resolver ${parentId}`);
-      void ticket.reconcile().catch((error) => log.debug(`Reconciliacion: ${error.message}`));
+      void ticket.reconcile().catch((error) => log.debug(`Reconciliacion: ${safeText(error)}`));
       const terminal = await awaitTicket(ticket, flag);
       if (mayAdoptRunning) {
         if (staleBusyTerminal) {
@@ -196,10 +229,10 @@ async function exchange(req, sessionId, text, cfg, flag, monitor, log, {
         try { await ticket.promise; } catch {}
         throw error;
       }
-      log.warn(`Resultado ambiguo al enviar prompt; reconciliando sin reenviar: ${error.message}`);
+      log.warn(`Resultado ambiguo al enviar prompt; reconciliando sin reenviar: ${safeText(error)}`);
     }
 
-    void ticket.reconcile().catch((error) => log.debug(`Reconciliacion: ${error.message}`));
+    void ticket.reconcile().catch((error) => log.debug(`Reconciliacion: ${safeText(error)}`));
     return await awaitTicket(ticket, flag);
   }
 }
@@ -222,7 +255,7 @@ async function existingCompletion(req, sessionId, cfg, monitor, log) {
       return { terminal, text, reason: `La sesion ya tiene todos completados (${td.total}/${td.total})` };
     }
   } catch (error) {
-    log.debug(`No se pudo verificar todos existentes: ${error.message}`);
+    log.debug(`No se pudo verificar todos existentes: ${safeText(error)}`);
   }
   return null;
 }
@@ -267,8 +300,8 @@ async function runLoop({
     if (resumeExisting && !replaceObjective) {
       const existing = await existingCompletion(req, sessionId, cfg, monitor, log);
       if (existing) {
-        state.lastText = existing.text;
-        return { status: 'complete', reason: existing.reason, state };
+        state.lastText = safeText(existing.text, 16_000);
+        return { status: 'complete', reason: safeText(existing.reason), state };
       }
     }
     for (let i = 1; i <= cfg.maxIterations;) {
@@ -292,15 +325,16 @@ async function runLoop({
         } catch (e) {
           if (e instanceof LoopAborted || flag.aborted) throw new LoopAborted();
           consecutiveErrors++;
-          log.warn(`Fallo en el intercambio (intento ${attempt}/${cfg.retries + 1}, consecutivos: ${consecutiveErrors}): ${e.message}`);
+          const failure = safeText(e);
+          log.warn(`Fallo en el intercambio (intento ${attempt}/${cfg.retries + 1}, consecutivos: ${consecutiveErrors}): ${failure}`);
           if (e instanceof LoopStalled || e instanceof SessionTurnError ||
             e instanceof TurnCorrelationError || e instanceof UnsafeSessionHistoryError ||
             consecutiveErrors >= cfg.maxConsecutiveErrors) {
             status = 'error';
             reason = e instanceof LoopStalled || e instanceof SessionTurnError ||
               e instanceof TurnCorrelationError || e instanceof UnsafeSessionHistoryError
-              ? e.message
-              : `${consecutiveErrors} fallos consecutivos. Ultimo: ${e.message}`;
+              ? failure
+              : `${consecutiveErrors} fallos consecutivos. Ultimo: ${failure}`;
             break;
           }
           await sleepAbortable(cfg.retryDelayMs, flag);
@@ -320,7 +354,7 @@ async function runLoop({
       state.cost += u.cost;
 
       const text = assistantText(reply.parts);
-      state.lastText = text;
+      state.lastText = safeText(text, 16_000);
       if (onState) {
         onState({
           type: 'settling',
@@ -328,14 +362,20 @@ async function runLoop({
           iteration: i,
           tokens: { ...state.tokens },
           cost: state.cost,
-          lastText: text,
+          lastText: state.lastText,
         });
       }
 
       const agentErr = messageError(reply.info);
       if (agentErr) {
         consecutiveErrors++;
-        log.warn(`El agente reporto error: ${JSON.stringify(agentErr).slice(0, 250)}`);
+        const summary = agentErrorSummary(agentErr);
+        log.warn(`El agente reporto error: ${summary}`);
+        if (nonRetryableAgentError(agentErr)) {
+          status = 'error';
+          reason = `Error no reintentable del agente/proveedor: ${summary}`;
+          break;
+        }
         if (consecutiveErrors >= cfg.maxConsecutiveErrors) {
           status = 'error';
           reason = 'Errores repetidos del agente/proveedor';
@@ -347,7 +387,7 @@ async function runLoop({
       consecutiveErrors = 0;
 
       log.info(`Respuesta recibida (${u.output} tok salida, acumulado $${state.cost.toFixed(4)}):`);
-      console.log(`  ${excerpt(text)}`);
+      console.log(`  ${excerpt(state.lastText)}`);
 
       // senal 1: marcador textual de tarea completa
       if (hasSentinel(text, cfg.sentinel)) {
@@ -363,7 +403,7 @@ async function runLoop({
           const todos = await req('GET', `/session/${sessionId}/todo`);
           td = todosDone(todos);
         } catch (e) {
-          log.debug(`No se pudo consultar todos: ${e.message}`);
+          log.debug(`No se pudo consultar todos: ${safeText(e)}`);
         }
         if (td) {
           log.info(`Progreso todos: ${td.completed}/${td.total}`);
@@ -382,13 +422,13 @@ async function runLoop({
       reason = 'Interrumpido por el usuario';
     } else {
       status = 'error';
-      reason = e.message;
+      reason = safeText(e);
     }
   } finally {
     monitor.close();
   }
 
-  return { status, reason, state };
+  return { status, reason: safeText(reason), state };
 }
 
 module.exports = {

@@ -78,6 +78,15 @@ async function fixture() {
       if (pathname === '/session/ses_wrong1') {
         return { id: 'ses_wrong1', title: 'Directa ajena', directory: otherWorkspace, projectID: 'other', time: { created: 3, updated: 4 } };
       }
+      if (pathname === '/session/ses_global1') {
+        return { id: 'ses_global1', title: 'Global exacta', directory: otherWorkspace, projectID: 'global', time: { created: 3, updated: 5 } };
+      }
+      if (pathname === '/session/ses_globalmissing1') {
+        return { id: 'ses_globalmissing1', title: 'Global sin ruta', projectID: 'global', time: { created: 3, updated: 5 } };
+      }
+      if (pathname === '/session/ses_globalforeign1') {
+        return { id: 'ses_globalforeign1', title: 'Global ajena', directory: workspace, projectID: 'global', time: { created: 3, updated: 5 } };
+      }
       throw new Error(`unexpected ${method} ${pathname}`);
     },
   };
@@ -119,6 +128,94 @@ test('catálogo Desktop agrega sesiones globales y adopta un oc:// exacto con su
   assert.equal(fx.calls.filter((call) => call.type === 'register').at(-1).token, fx.descriptor.token);
 });
 
+test('connect propaga ConfigInvalidError sanitizado cuando GET de la sesión exacta responde 400', async (t) => {
+  const fx = await fixture();
+  t.after(() => rm(fx.root, { recursive: true, force: true }));
+  await writeFile(path.join(fx.registry, 'bridge.json'), JSON.stringify(fx.descriptor));
+  const originalRequest = fx.dependencies.server.request;
+  fx.dependencies.server.request = async (...args) => {
+    if (args[2] === '/session/ses_configinvalid1') {
+      const error = new Error(
+        'HTTP 400 en GET /session/ses_configinvalid1: ConfigInvalidError: Configuración de OpenCode inválida; token="bridge-secret-value"',
+      );
+      error.status = 400;
+      throw error;
+    }
+    return originalRequest(...args);
+  };
+  const catalog = new OpenCodeDesktopBridgeCatalog(() => undefined, fx.dependencies);
+  t.after(() => catalog.close());
+
+  await assert.rejects(
+    catalog.connect({
+      workspace: fx.workspace,
+      binary: null,
+      attach: null,
+      sessionRef: 'ses_configinvalid1',
+    }),
+    (error) => {
+      assert.equal(error.name, 'ConfigInvalidError');
+      assert.equal(error.status, 400);
+      assert.match(error.message, /Configuración de OpenCode inválida/iu);
+      assert.match(error.message, /token="\[REDACTED\]/u);
+      assert.doesNotMatch(error.message, /bridge-secret-value/u);
+      return true;
+    },
+  );
+});
+
+test('reconcile propaga ConfigInvalidError de status aunque conserve un catálogo previo', async (t) => {
+  const fx = await fixture();
+  t.after(() => rm(fx.root, { recursive: true, force: true }));
+  await writeFile(path.join(fx.registry, 'bridge.json'), JSON.stringify(fx.descriptor));
+  const originalRequest = fx.dependencies.server.request;
+  let rejectStatus = false;
+  fx.dependencies.server.request = async (...args) => {
+    if (rejectStatus && args[2] === '/session/status') {
+      const error = new Error('HTTP 400: ConfigInvalidError token="status-secret-value"');
+      error.name = 'ConfigInvalidError';
+      error.status = 400;
+      throw error;
+    }
+    return originalRequest(...args);
+  };
+  const catalog = new OpenCodeDesktopBridgeCatalog(() => undefined, fx.dependencies);
+  t.after(() => catalog.close());
+
+  await catalog.connect({ workspace: fx.workspace, binary: null, attach: null, sessionRef: null });
+  rejectStatus = true;
+  await assert.rejects(catalog.reconcile(), (error) => {
+    assert.equal(error.name, 'ConfigInvalidError');
+    assert.equal(error.status, 400);
+    assert.match(error.message, /token="\[REDACTED\]"/u);
+    assert.doesNotMatch(error.message, /status-secret-value/u);
+    return true;
+  });
+  assert.deepEqual(catalog.current().map((session) => session.id), ['ses_mixed1', 'ses_visible1']);
+});
+
+test('catálogo rechaza referencias ambiguas antes de consultar un sidecar', async (t) => {
+  const fx = await fixture();
+  t.after(() => rm(fx.root, { recursive: true, force: true }));
+  const catalog = new OpenCodeDesktopBridgeCatalog(() => undefined, fx.dependencies);
+  t.after(() => catalog.close());
+  const exact = 'oc://renderer/server/c2lkZWNhcg/session/ses_adopted1';
+
+  for (const sessionRef of [
+    'prefix-ses_adopted1',
+    'oc://evil/server/c2lkZWNhcg/session/ses_adopted1',
+    'oc://renderer/server/otro/session/ses_adopted1',
+    `${exact}?directory=C%3A%5Csecreto`,
+    `${exact}/message`,
+  ]) {
+    await assert.rejects(
+      catalog.connect({ workspace: fx.workspace, binary: null, attach: null, sessionRef }),
+      /referencia.*no es válida/iu,
+    );
+  }
+  assert.equal(fx.calls.length, 0);
+});
+
 test('conexiones iguales se comparten y un SSE que no abre falla con tiempo acotado', async (t) => {
   const fx = await fixture();
   t.after(() => rm(fx.root, { recursive: true, force: true }));
@@ -152,6 +249,58 @@ test('conexiones iguales se comparten y un SSE que no abre falla con tiempo acot
   assert.equal(aborted, true);
 });
 
+test('conexiones concurrentes del mismo ID conservan workspaces y rutas separados', async (t) => {
+  const fx = await fixture();
+  t.after(() => rm(fx.root, { recursive: true, force: true }));
+  await writeFile(path.join(fx.registry, 'bridge.json'), JSON.stringify(fx.descriptor));
+  const originalRequest = fx.dependencies.server.request;
+  const routeDirectories = [];
+  let releaseFirst;
+  let markFirstStarted;
+  const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
+  const firstStarted = new Promise((resolve) => { markFirstStarted = resolve; });
+  fx.dependencies.server.request = async (...args) => {
+    const [, , pathname, , options] = args;
+    if (pathname !== '/session/ses_concurrent1') return originalRequest(...args);
+    routeDirectories.push(options.directory);
+    if (options.directory === fx.workspace) {
+      markFirstStarted();
+      await firstGate;
+    }
+    return {
+      id: 'ses_concurrent1',
+      title: 'Concurrente',
+      directory: options.directory,
+      projectID: 'global',
+      time: { created: 5, updated: 6 },
+    };
+  };
+  const catalog = new OpenCodeDesktopBridgeCatalog(() => undefined, fx.dependencies);
+  t.after(() => catalog.close());
+  const sessionRef = 'oc://renderer/server/c2lkZWNhcg/session/ses_concurrent1';
+
+  const firstPromise = catalog.connect({
+    workspace: fx.workspace,
+    binary: null,
+    attach: null,
+    sessionRef,
+  });
+  await firstStarted;
+  const secondPromise = catalog.connect({
+    workspace: fx.otherWorkspace,
+    binary: null,
+    attach: null,
+    sessionRef,
+  });
+  releaseFirst();
+  const [first, second] = await Promise.all([firstPromise, secondPromise]);
+
+  assert.notStrictEqual(first, second);
+  assert.equal(first.sessions.find((session) => session.id === 'ses_concurrent1')?.workspace, fx.workspace);
+  assert.equal(second.sessions.find((session) => session.id === 'ses_concurrent1')?.workspace, fx.otherWorkspace);
+  assert.deepEqual(routeDirectories, [fx.workspace, fx.otherWorkspace]);
+});
+
 test('adopción rechaza una sesión exacta si el bridge no pertenece a su proyecto', async (t) => {
   const fx = await fixture();
   t.after(() => rm(fx.root, { recursive: true, force: true }));
@@ -167,6 +316,72 @@ test('adopción rechaza una sesión exacta si el bridge no pertenece a su proyec
   });
   assert.equal(result.sessions.some((session) => session.id === 'ses_wrong1'), false);
   assert.throws(() => catalog.endpointForSession('ses_wrong1'), /no está disponible/iu);
+});
+
+test('adopta una sesión global exacta desde el workspace solicitado aunque no exista su descriptor', async (t) => {
+  const fx = await fixture();
+  t.after(() => rm(fx.root, { recursive: true, force: true }));
+  await writeFile(path.join(fx.registry, 'bridge.json'), JSON.stringify(fx.descriptor));
+  const catalog = new OpenCodeDesktopBridgeCatalog(() => undefined, fx.dependencies);
+  t.after(() => catalog.close());
+
+  const result = await catalog.connect({
+    workspace: fx.otherWorkspace,
+    binary: null,
+    attach: null,
+    sessionRef: 'ses_global1',
+  });
+
+  const adopted = result.sessions.find((session) => session.id === 'ses_global1');
+  assert.equal(adopted?.workspace, fx.otherWorkspace);
+  assert.equal(catalog.endpointForSession('ses_global1').directory, fx.otherWorkspace);
+  assert.equal(
+    fx.calls.some((call) => call.pathname === '/session/ses_global1' && call.options.directory === fx.otherWorkspace),
+    true,
+  );
+});
+
+test('adopción global exacta exige una ruta absoluta explícita del workspace solicitado', async (t) => {
+  const fx = await fixture();
+  t.after(() => rm(fx.root, { recursive: true, force: true }));
+  await writeFile(path.join(fx.registry, 'bridge.json'), JSON.stringify(fx.descriptor));
+  const catalog = new OpenCodeDesktopBridgeCatalog(() => undefined, fx.dependencies);
+  t.after(() => catalog.close());
+
+  for (const sessionRef of ['ses_globalmissing1', 'ses_globalforeign1']) {
+    const result = await catalog.connect({
+      workspace: fx.otherWorkspace,
+      binary: null,
+      attach: null,
+      sessionRef,
+    });
+    assert.equal(result.sessions.some((session) => session.id === sessionRef), false);
+    assert.throws(() => catalog.endpointForSession(sessionRef), /no está disponible/iu);
+  }
+});
+
+test('catálogo global solo incluye sesiones con ruta absoluta explícita del descriptor', async (t) => {
+  const fx = await fixture();
+  t.after(() => rm(fx.root, { recursive: true, force: true }));
+  fx.descriptor.projectID = 'global';
+  await writeFile(path.join(fx.registry, 'bridge.json'), JSON.stringify(fx.descriptor));
+  const originalRequest = fx.dependencies.server.request;
+  fx.dependencies.server.request = async (...args) => {
+    if (args[2] === '/session') {
+      return [
+        { id: 'ses_globalvalid1', title: 'Global válida', directory: fx.workspace, projectID: 'global', time: { created: 1, updated: 5 } },
+        { id: 'ses_globalmissing2', title: 'Global sin ruta', projectID: 'global', time: { created: 1, updated: 4 } },
+        { id: 'ses_globalrelative1', title: 'Global relativa', directory: 'workspace', projectID: 'global', time: { created: 1, updated: 3 } },
+        { id: 'ses_globalforeign2', title: 'Global ajena', directory: fx.otherWorkspace, projectID: 'global', time: { created: 1, updated: 2 } },
+      ];
+    }
+    return originalRequest(...args);
+  };
+  const catalog = new OpenCodeDesktopBridgeCatalog(() => undefined, fx.dependencies);
+  t.after(() => catalog.close());
+
+  const result = await catalog.connect({ workspace: fx.workspace, binary: null, attach: null, sessionRef: null });
+  assert.deepEqual(result.sessions.map((session) => session.id), ['ses_globalvalid1']);
 });
 
 test('si no hay bridge instala el plugin global sin sobrescribir archivos ajenos', async (t) => {

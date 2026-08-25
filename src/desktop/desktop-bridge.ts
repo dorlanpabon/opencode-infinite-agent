@@ -8,6 +8,10 @@ import type {
   SessionConnectionInput,
 } from './contracts.js';
 
+const { parseSessionRef } = require('../session-ref.js') as {
+  parseSessionRef(input: unknown): string | null;
+};
+
 interface EventStream {
   ready: Promise<void>;
   subscribe(listener: (event: unknown) => void): () => void;
@@ -105,6 +109,50 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function errorStatus(value: unknown): number | null {
+  if (!isRecord(value)) return null;
+  const status = Number(value.status);
+  return Number.isInteger(status) && status >= 400 && status <= 599 ? status : null;
+}
+
+function isConfigInvalidFailure(value: unknown): boolean {
+  const name = isRecord(value) && typeof value.name === 'string' ? value.name : '';
+  const message = value instanceof Error
+    ? value.message
+    : isRecord(value) && typeof value.message === 'string' ? value.message : '';
+  return name === 'ConfigInvalidError'
+    || /ConfigInvalidError|configuraci[oó]n(?: de OpenCode)? inv[aá]lida|configuration (?:is )?invalid/iu.test(message);
+}
+
+function sanitizedBridgeFailure(value: unknown): Error {
+  const status = errorStatus(value);
+  const source = value instanceof Error
+    ? value.message
+    : isRecord(value) && typeof value.message === 'string' ? value.message : 'OpenCode Desktop rechazó la sesión solicitada.';
+  const message = source
+    .replace(/\u001B\[[0-?]*[ -/]*[@-~]/gu, '')
+    .replace(/[\r\n\t]+/gu, ' ')
+    .replace(/(authorization\s*:\s*(?:basic|bearer)\s+)[^\s,;]+/giu, '$1[REDACTED]')
+    .replace(/((?:password|token|secret|api[_-]?key)"?\s*[=:]\s*"?)[^\s,;"}]+/giu, '$1[REDACTED]')
+    .replace(/\b(?:sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16})\b/gu, '[REDACTED]')
+    .trim()
+    .slice(0, 2_000) || 'OpenCode Desktop rechazó la sesión solicitada.';
+  const failure = new Error(message) as Error & { status?: number };
+  failure.name = isConfigInvalidFailure(value) ? 'ConfigInvalidError' : 'OpenCodeDesktopError';
+  if (status !== null) failure.status = status;
+  return failure;
+}
+
+function preferredBridgeFailure(attempts: PromiseSettledResult<unknown>[]): Error | null {
+  const rejections = attempts.flatMap((attempt) => attempt.status === 'rejected' ? [attempt.reason] : []);
+  const selected = rejections.find(isConfigInvalidFailure)
+    ?? rejections.find((reason) => {
+      const status = errorStatus(reason);
+      return status !== null && status >= 400 && status < 500;
+    });
+  return selected === undefined ? null : sanitizedBridgeFailure(selected);
+}
+
 function normalizedPath(value: string): string {
   const resolved = path.resolve(value);
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
@@ -117,13 +165,16 @@ function eventType(value: unknown): string | null {
 }
 
 function sessionIdFromReference(value: string | null): string | null {
-  if (!value) return null;
-  const match = /ses_[A-Za-z0-9]+/u.exec(value);
-  return match?.[0] ?? null;
+  return parseSessionRef(value);
 }
 
 function connectionKey(input: SessionConnectionInput): string {
-  return sessionIdFromReference(input.sessionRef) ?? '';
+  return JSON.stringify([
+    normalizedPath(input.workspace),
+    input.attach ?? '',
+    input.binary ? normalizedPath(input.binary) : '',
+    input.sessionRef ?? '',
+  ]);
 }
 
 async function waitForStream(stream: EventStream, timeoutMs: number, controller: AbortController): Promise<void> {
@@ -200,14 +251,25 @@ function parseDescriptor(value: unknown): DesktopBridgeDescriptor | null {
   };
 }
 
+function explicitSessionWorkspace(raw: Record<string, unknown>): string | null {
+  return typeof raw.directory === 'string' && path.isAbsolute(raw.directory) ? raw.directory : null;
+}
+
+function sessionWorkspace(raw: Record<string, unknown>, fallbackWorkspace: string): string | null {
+  const explicit = explicitSessionWorkspace(raw);
+  return raw.projectID === 'global' ? explicit : explicit ?? fallbackWorkspace;
+}
+
 function summaryOf(raw: Record<string, unknown>, status: unknown, fallbackWorkspace: string): OpenCodeSessionSummary | null {
   if (typeof raw.id !== 'string' || !SESSION_ID.test(raw.id)) return null;
+  const workspace = sessionWorkspace(raw, fallbackWorkspace);
+  if (!workspace) return null;
   const time = isRecord(raw.time) ? raw.time : {};
   const sessionStatus = statusOf(status);
   return {
     id: raw.id,
     title: typeof raw.title === 'string' && raw.title.trim() ? raw.title.slice(0, 512) : raw.id,
-    workspace: typeof raw.directory === 'string' && path.isAbsolute(raw.directory) ? raw.directory : fallbackWorkspace,
+    workspace,
     createdAt: timestamp(time.created),
     updatedAt: timestamp(time.updated ?? time.created),
     status: sessionStatus.status,
@@ -240,8 +302,11 @@ function ownsSession(
   workspace: string,
 ): boolean {
   if (typeof raw.projectID !== 'string' || raw.projectID !== descriptor.projectID) return false;
-  return raw.projectID !== 'global'
-    || normalizedPath(workspace) === normalizedPath(descriptor.directory);
+  if (raw.projectID !== 'global') return true;
+  const explicit = explicitSessionWorkspace(raw);
+  return explicit !== null
+    && normalizedPath(workspace) === normalizedPath(explicit)
+    && normalizedPath(explicit) === normalizedPath(descriptor.directory);
 }
 
 async function installPlugin(dependencies: DesktopBridgeDependencies): Promise<{
@@ -288,6 +353,7 @@ export class OpenCodeDesktopBridgeCatalog {
   private openingControllers = new Set<AbortController>();
   private bridgeFailures = new Map<string, number>();
   private authenticatedEndpoints = new Set<string>();
+  private requestedWorkspace: string | null = null;
   private disposed = false;
 
   constructor(
@@ -317,8 +383,13 @@ export class OpenCodeDesktopBridgeCatalog {
 
   private async open(input: SessionConnectionInput): Promise<{ sessions: OpenCodeSessionSummary[] }> {
     if (this.disposed) throw new Error('El catálogo de OpenCode Desktop está cerrado.');
+    const sessionReference = sessionIdFromReference(input.sessionRef);
+    if (input.sessionRef !== null && !sessionReference) {
+      throw new TypeError('La referencia de sesión OpenCode no es válida.');
+    }
     await this.release();
-    this.sessionReference = sessionIdFromReference(input.sessionRef);
+    this.sessionReference = sessionReference;
+    this.requestedWorkspace = path.resolve(input.workspace);
     const installation = await installPlugin(this.dependencies);
     const descriptors = await this.discover(installation.buildId);
     if (descriptors.length === 0) {
@@ -457,6 +528,8 @@ export class OpenCodeDesktopBridgeCatalog {
           this.active = this.active.filter((endpoint) => !failed.has(endpoint.descriptor.bridgeId));
         }
         if (results.length === 0) {
+          const failure = preferredBridgeFailure(settled);
+          if (failure) throw failure;
           if (this.snapshot.length > 0 && this.active.length > 0) continue;
           this.endpointBySession.clear();
           this.snapshot = [];
@@ -516,18 +589,34 @@ export class OpenCodeDesktopBridgeCatalog {
     sessionId: string,
     results: Array<{ descriptor: DesktopBridgeDescriptor; statuses: Record<string, unknown> }>,
   ): Promise<{ summary: OpenCodeSessionSummary; endpoint: DesktopBridgeDescriptor; score: number } | null> {
+    const requestedWorkspace = this.requestedWorkspace;
+    if (!requestedWorkspace) return null;
     const attempts = await Promise.allSettled(results.map(async ({ descriptor, statuses }) => {
       const raw = await this.dependencies.server.request(
         descriptor.endpoint,
         'GET',
         `/session/${sessionId}`,
         null,
-        { directory: descriptor.directory, timeoutMs: 5_000 },
+        { directory: requestedWorkspace, timeoutMs: 5_000 },
       );
       if (!isRecord(raw)) return null;
-      const summary = summaryOf(raw, statuses[sessionId], descriptor.directory);
+      const scopedStatuses = normalizedPath(requestedWorkspace) === normalizedPath(descriptor.directory)
+        ? statuses
+        : await this.dependencies.server.request(
+          descriptor.endpoint,
+          'GET',
+          '/session/status',
+          null,
+          { directory: requestedWorkspace, timeoutMs: 5_000 },
+        );
+      const summary = summaryOf(
+        raw,
+        isRecord(scopedStatuses) ? scopedStatuses[sessionId] : null,
+        requestedWorkspace,
+      );
       if (!summary) return null;
-      if (!ownsSession(descriptor, raw, summary.workspace)) return null;
+      if (normalizedPath(summary.workspace) !== normalizedPath(requestedWorkspace)) return null;
+      if (raw.projectID !== 'global' && !ownsSession(descriptor, raw, summary.workspace)) return null;
       const endpoint = routeDescriptor(descriptor, raw, summary.workspace);
       const score = 2
         + (normalizedPath(summary.workspace) === normalizedPath(descriptor.directory) ? 1 : 0)
@@ -536,7 +625,10 @@ export class OpenCodeDesktopBridgeCatalog {
     }));
     const matches = attempts.flatMap((attempt) => attempt.status === 'fulfilled' && attempt.value ? [attempt.value] : []);
     matches.sort((a, b) => b.score - a.score);
-    return matches[0] ?? null;
+    if (matches[0]) return matches[0];
+    const failure = preferredBridgeFailure(attempts);
+    if (failure) throw failure;
+    return null;
   }
 
   private async discover(buildId: string): Promise<DesktopBridgeDescriptor[]> {

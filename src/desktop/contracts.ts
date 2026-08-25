@@ -1,5 +1,8 @@
 export const DESKTOP_ORIGIN = 'opencode-infinite://app';
 
+const SESSION_ID_REFERENCE = /^ses_[A-Za-z0-9]+$/u;
+const INTERNAL_SESSION_LINK = /^oc:\/\/renderer\/server\/c2lkZWNhcg\/session\/ses_[A-Za-z0-9]+$/u;
+
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 export type SseState = 'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'closed';
 export type RunStatus =
@@ -47,6 +50,14 @@ export interface SessionConnectionInput {
   binary: string | null;
   attach: string | null;
   sessionRef: string | null;
+}
+
+export interface OpenProjectInput {
+  workspace: string;
+}
+
+export interface CopySessionLinkInput {
+  sessionId: string;
 }
 
 export type OpenCodeSessionStatus = 'idle' | 'busy' | 'retry';
@@ -148,6 +159,8 @@ export interface DesktopApi {
   listRuns(): Promise<RunState[]>;
   getRun(runId: string): Promise<RunState>;
   listSessions(input: SessionConnectionInput): Promise<OpenCodeSessionSummary[]>;
+  openOpenCodeProject(workspace: string): Promise<void>;
+  copyOpenCodeSessionLink(sessionId: string): Promise<void>;
   setContinuous(input: SetContinuousInput): Promise<OperationReceipt>;
   startRun(input: StartRunInput): Promise<OperationReceipt>;
   stopRun(runId: string): Promise<OperationReceipt>;
@@ -270,11 +283,10 @@ export function parseStartRunInput(value: unknown): StartRunInput {
     throw new TypeError('Confirma explícitamente la autoaprobación antes de iniciar.');
   }
   const sessionRef = normalizedOptional(value.sessionRef);
-  if (sessionRef !== null && !/^ses_[A-Za-z0-9]+$/u.test(sessionRef)
-    && !/^oc:\/\/[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]+$/u.test(sessionRef)) {
-    throw new TypeError('La sesión debe ser un ID ses_… o un deeplink oc:// válido.');
+  if (sessionRef !== null && !SESSION_ID_REFERENCE.test(sessionRef) && !INTERNAL_SESSION_LINK.test(sessionRef)) {
+    throw new TypeError('La sesión debe ser un ID ses_… o un enlace interno de OpenCode Desktop válido.');
   }
-  if (value.resumeExisting && (sessionRef === null || !/^ses_[A-Za-z0-9]+$/u.test(sessionRef))) {
+  if (value.resumeExisting && (sessionRef === null || !SESSION_ID_REFERENCE.test(sessionRef))) {
     throw new TypeError('El modo continuo requiere un ID de sesión ses_… exacto.');
   }
   return {
@@ -308,9 +320,8 @@ export function parseSessionConnectionInput(value: unknown): SessionConnectionIn
     throw new TypeError('Parámetros de sesiones inválidos.');
   }
   const sessionRef = normalizedOptional(value.sessionRef);
-  if (sessionRef !== null && !/^ses_[A-Za-z0-9]+$/u.test(sessionRef)
-    && !/^oc:\/\/[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]+$/u.test(sessionRef)) {
-    throw new TypeError('La sesión debe ser un ID ses_… o un enlace oc:// válido.');
+  if (sessionRef !== null && !SESSION_ID_REFERENCE.test(sessionRef) && !INTERNAL_SESSION_LINK.test(sessionRef)) {
+    throw new TypeError('La sesión debe ser un ID ses_… o un enlace interno de OpenCode Desktop válido.');
   }
   return {
     workspace: value.workspace.trim(),
@@ -325,6 +336,21 @@ export function parseSessionId(value: unknown): string {
     throw new TypeError('Session ID inválido.');
   }
   return value;
+}
+
+export function parseOpenProjectInput(value: unknown): OpenProjectInput {
+  if (!isRecord(value) || !hasExactKeys(value, ['workspace'])
+    || typeof value.workspace !== 'string' || value.workspace.length === 0 || value.workspace.length > 32_767) {
+    throw new TypeError('Parámetros para abrir el proyecto inválidos.');
+  }
+  return { workspace: value.workspace };
+}
+
+export function parseCopySessionLinkInput(value: unknown): CopySessionLinkInput {
+  if (!isRecord(value) || !hasExactKeys(value, ['sessionId'])) {
+    throw new TypeError('Parámetros para copiar el enlace inválidos.');
+  }
+  return { sessionId: parseSessionId(value.sessionId) };
 }
 
 export function parseSetContinuousInput(value: unknown): SetContinuousInput {

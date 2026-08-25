@@ -236,6 +236,33 @@ button:disabled {
   font-size: 10px;
 }
 
+.session-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 8px;
+  margin-top: 7px;
+}
+
+.session-action {
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--amber);
+  font-size: 8px;
+  font-weight: 650;
+  text-align: left;
+}
+
+.session-action:hover:not(:disabled) {
+  color: var(--amber-bright);
+}
+
+.session-action:focus-visible {
+  border-radius: 2px;
+  outline: 2px solid var(--amber-bright);
+  outline-offset: 2px;
+}
+
 .session-switch {
   position: relative;
   display: grid;
@@ -1112,6 +1139,19 @@ progress::-webkit-progress-value {
 
 .inspector-list.spaced {
   margin-top: 10px;
+}
+
+.inspector-actions {
+  display: grid;
+  gap: 7px;
+  margin-top: 12px;
+}
+
+.inspector-actions .button {
+  width: 100%;
+  min-height: 34px;
+  padding-inline: 10px;
+  font-size: 10px;
 }
 
 .inspector-list div {

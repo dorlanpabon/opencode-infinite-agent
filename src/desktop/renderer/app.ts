@@ -119,6 +119,9 @@ const ui = {
   inspectModel: element<HTMLElement>('inspect-model'),
   inspectAgent: element<HTMLElement>('inspect-agent'),
   inspectLimit: element<HTMLElement>('inspect-limit'),
+  inspectSessionActions: element<HTMLElement>('inspect-session-actions'),
+  inspectOpenProjectButton: element<HTMLButtonElement>('inspect-open-project-button'),
+  inspectCopySessionLinkButton: element<HTMLButtonElement>('inspect-copy-session-link-button'),
   clearLogsButton: element<HTMLButtonElement>('clear-logs-button'),
   logList: element<HTMLOListElement>('log-list'),
   logsEmpty: element<HTMLElement>('logs-empty'),
@@ -344,13 +347,61 @@ function sessionStatusLabel(session: OpenCodeSessionSummary): string {
   return 'En espera';
 }
 
+function workspaceBasename(workspace: string): string {
+  const normalized = workspace.replace(/[\\/]+$/u, '');
+  return normalized.split(/[\\/]/u).at(-1) || workspace;
+}
+
+function exactRunSessionId(run: RunState): string | null {
+  if (run.sessionId && /^ses_[A-Za-z0-9]+$/u.test(run.sessionId)) return run.sessionId;
+  if (run.sessionRef && /^ses_[A-Za-z0-9]+$/u.test(run.sessionRef)) return run.sessionRef;
+  const match = run.sessionRef?.match(/^oc:\/\/renderer\/server\/c2lkZWNhcg\/session\/(ses_[A-Za-z0-9]+)$/u);
+  return match?.[1] ?? null;
+}
+
+async function openProjectInOpenCode(workspace: string, button: HTMLButtonElement): Promise<void> {
+  button.disabled = true;
+  try {
+    await api.openOpenCodeProject(workspace);
+    appendLog('info', `Proyecto abierto en OpenCode: ${workspace}`);
+    toast('Proyecto abierto en OpenCode Desktop.');
+    announce('Proyecto abierto en OpenCode Desktop.');
+  } catch (error) {
+    const message = errorText(error);
+    appendLog('error', `Abrir proyecto: ${message}`);
+    toast(message, true);
+    announce('No se pudo abrir el proyecto en OpenCode Desktop.');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function copyInternalSessionLink(sessionId: string, button: HTMLButtonElement): Promise<void> {
+  button.disabled = true;
+  try {
+    await api.copyOpenCodeSessionLink(sessionId);
+    appendLog('info', `Enlace interno copiado para ${sessionId}.`);
+    toast('Enlace interno copiado.');
+    announce('Enlace interno de sesión copiado.');
+  } catch (error) {
+    const message = errorText(error);
+    appendLog('error', `Copiar enlace interno: ${message}`);
+    toast(message, true);
+    announce('No se pudo copiar el enlace interno de la sesión.');
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function renderSessionList(): void {
   const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const focusedSessionId = activeElement?.dataset.sessionId
     ?? activeElement?.dataset.sessionFocusFallback
     ?? null;
+  const focusedSessionAction = activeElement?.dataset.sessionAction ?? null;
   const fragment = document.createDocumentFragment();
   const globallyBusy = hasActiveRun();
+  const trustedDesktopSessions = sessionConnection?.attach === null;
   for (const [index, session] of sessions.entries()) {
     const blockedByGlobalRun = globallyBusy && !session.continuous;
     const item = document.createElement('article');
@@ -358,7 +409,11 @@ function renderSessionList(): void {
     item.dataset.status = session.status;
     item.dataset.sessionFocusFallback = session.id;
     item.tabIndex = -1;
-    item.setAttribute('aria-label', `${session.title}. ${sessionStatusLabel(session)}.`);
+    const workspaceName = workspaceBasename(session.workspace);
+    item.setAttribute(
+      'aria-label',
+      `${session.title}. Workspace ${workspaceName}: ${session.workspace}. ${sessionStatusLabel(session)}.`,
+    );
 
     const content = document.createElement('span');
     content.className = 'session-item-content';
@@ -366,8 +421,29 @@ function renderSessionList(): void {
     title.textContent = session.title;
     title.title = session.title;
     const meta = document.createElement('small');
-    meta.textContent = `${sessionStatusLabel(session)} · ${formatRelative(session.updatedAt)}`;
+    meta.textContent = `${workspaceName} · ${sessionStatusLabel(session)} · ${formatRelative(session.updatedAt)}`;
+    meta.title = session.workspace;
     content.append(title, meta);
+    if (trustedDesktopSessions) {
+      const actions = document.createElement('span');
+      actions.className = 'session-actions';
+      const openProject = document.createElement('button');
+      openProject.type = 'button';
+      openProject.className = 'session-action';
+      openProject.dataset.sessionId = session.id;
+      openProject.dataset.sessionAction = 'open-project';
+      openProject.textContent = 'Abrir proyecto en OpenCode';
+      openProject.addEventListener('click', () => { void openProjectInOpenCode(session.workspace, openProject); });
+      const copyLink = document.createElement('button');
+      copyLink.type = 'button';
+      copyLink.className = 'session-action';
+      copyLink.dataset.sessionId = session.id;
+      copyLink.dataset.sessionAction = 'copy-internal-link';
+      copyLink.textContent = 'Copiar enlace interno';
+      copyLink.addEventListener('click', () => { void copyInternalSessionLink(session.id, copyLink); });
+      actions.append(openProject, copyLink);
+      content.append(actions);
+    }
 
     const label = document.createElement('label');
     label.className = 'session-switch';
@@ -409,8 +485,14 @@ function renderSessionList(): void {
   }
   ui.sessionList.replaceChildren(fragment);
   if (focusedSessionId) {
-    const replacement = [...ui.sessionList.querySelectorAll<HTMLInputElement>('input[data-session-id]')]
-      .find((input) => input.dataset.sessionId === focusedSessionId);
+    const actionReplacement = focusedSessionAction
+      ? [...ui.sessionList.querySelectorAll<HTMLButtonElement>('button[data-session-action]')]
+        .find((button) => button.dataset.sessionId === focusedSessionId
+          && button.dataset.sessionAction === focusedSessionAction)
+      : null;
+    const replacement = actionReplacement
+      ?? [...ui.sessionList.querySelectorAll<HTMLInputElement>('input[data-session-id]')]
+        .find((input) => input.dataset.sessionId === focusedSessionId);
     if (replacement && !replacement.disabled) {
       replacement.focus();
     } else {
@@ -503,6 +585,9 @@ function renderSelectedRun(): void {
     ui.inspectModel.textContent = 'Predeterminado';
     ui.inspectAgent.textContent = 'Predeterminado';
     ui.inspectLimit.textContent = '—';
+    ui.inspectSessionActions.hidden = true;
+    ui.inspectOpenProjectButton.disabled = true;
+    ui.inspectCopySessionLinkButton.disabled = true;
     return;
   }
 
@@ -546,6 +631,14 @@ function renderSelectedRun(): void {
   ui.inspectModel.textContent = run.model ?? 'Predeterminado';
   ui.inspectAgent.textContent = run.agent ?? 'Predeterminado';
   ui.inspectLimit.textContent = `${run.maxIterations} iter. · ${run.maxHours} h · ${run.stallMinutes} min inactividad`;
+  const trustedDesktopSession = run.attach === null;
+  ui.inspectSessionActions.hidden = !trustedDesktopSession;
+  ui.inspectOpenProjectButton.disabled = !trustedDesktopSession;
+  const sessionId = trustedDesktopSession ? exactRunSessionId(run) : null;
+  ui.inspectCopySessionLinkButton.disabled = sessionId === null;
+  ui.inspectCopySessionLinkButton.title = !trustedDesktopSession
+    ? 'Disponible solo para sesiones verificadas por OpenCode Desktop.'
+    : sessionId === null ? 'La sesión todavía no está disponible.' : '';
 }
 
 function render(): void {
@@ -1012,6 +1105,15 @@ function wireEvents(): () => void {
   ui.inspectorDoctorButton.addEventListener('click', () => { void runDoctor(); });
   ui.dialogDoctorButton.addEventListener('click', () => { void runDoctor(); });
   ui.stopRunButton.addEventListener('click', () => { void stopSelectedRun(); });
+  ui.inspectOpenProjectButton.addEventListener('click', () => {
+    const run = selectedRun();
+    if (run?.attach === null) void openProjectInOpenCode(run.workspace, ui.inspectOpenProjectButton);
+  });
+  ui.inspectCopySessionLinkButton.addEventListener('click', () => {
+    const run = selectedRun();
+    const sessionId = run?.attach === null ? exactRunSessionId(run) : null;
+    if (sessionId) void copyInternalSessionLink(sessionId, ui.inspectCopySessionLinkButton);
+  });
   ui.clearLogsButton.addEventListener('click', () => {
     logs = [];
     renderLogs();

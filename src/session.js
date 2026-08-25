@@ -1,11 +1,8 @@
-function parseSessionRef(input) {
-  if (!input) return null;
-  const m = /ses_[A-Za-z0-9]+/.exec(String(input));
-  return m ? m[0] : null;
-}
+const { parseSessionRef } = require('./session-ref');
 
 async function resolveSession(req, { ref, title }) {
   const id = parseSessionRef(ref);
+  if (ref && !id) throw new TypeError('La referencia de sesión OpenCode no es válida.');
   if (id) {
     const session = await req('GET', `/session/${id}`);
     return { session, created: false };

@@ -85,12 +85,41 @@ async function bodyOf(request) {
 async function sdkData(promise) {
   const result = await promise;
   if (result && result.error !== undefined) {
-    const error = new Error('OpenCode rechazó la solicitud del puente.');
+    const error = new Error(configErrorSummary(result.error) ?? 'OpenCode rechazó la solicitud del puente.');
     error.status = Number(result.response?.status) || 502;
     error.detail = result.error;
     throw error;
   }
   return result?.data;
+}
+
+function diagnosticText(value, maximum = 320) {
+  if (typeof value !== 'string') return '';
+  return value
+    .replace(/[\r\n\t]+/gu, ' ')
+    .replace(/\b(?:sk-[A-Za-z0-9_-]{8,}|gh[opusr]_[A-Za-z0-9_-]{8,}|hf_[A-Za-z0-9_-]{8,})\b/giu, '[REDACTED]')
+    .replace(/\b(api[-_ ]?key|authorization|password|secret|token)\s*[:=]\s*[^,;\s]+/giu, '$1=[REDACTED]')
+    .trim()
+    .slice(0, maximum);
+}
+
+function configErrorSummary(detail) {
+  if (!detail || typeof detail !== 'object' || detail.name !== 'ConfigInvalidError'
+    || !detail.data || typeof detail.data !== 'object') return null;
+  const configPath = diagnosticText(detail.data.path, 1_024);
+  const issues = Array.isArray(detail.data.issues) ? detail.data.issues : [];
+  const summaries = issues.slice(0, 5).flatMap((issue) => {
+    if (!issue || typeof issue !== 'object') return [];
+    const field = Array.isArray(issue.path)
+      ? issue.path.map((part) => diagnosticText(String(part), 80)).filter(Boolean).join('.')
+      : '';
+    const message = diagnosticText(issue.message);
+    if (!field && !message) return [];
+    return [`${field || 'config'}${message ? `: ${message}` : ''}`];
+  });
+  const location = configPath ? ` en ${configPath}` : '';
+  const problems = summaries.length > 0 ? ` (${summaries.join('; ')})` : '';
+  return `Configuración de OpenCode inválida${location}${problems}.`;
 }
 
 async function globalSessions(client) {

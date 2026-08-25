@@ -37,7 +37,22 @@ test('plugin Desktop expone solo la API autenticada necesaria del SDK propietari
     session: {
       list: async (options) => { calls.push(['list', options]); return ok([{ id: 'ses_real1' }]); },
       status: async (options) => { calls.push(['status', options]); return ok({ ses_real1: { type: 'busy' } }); },
-      get: async (options) => { calls.push(['get', options]); return ok({ id: options.path.id, directory: workspace }); },
+      get: async (options) => {
+        calls.push(['get', options]);
+        if (options.path.id === 'ses_configinvalid') {
+          return {
+            error: {
+              name: 'ConfigInvalidError',
+              data: {
+                path: path.join(workspace, 'opencode.jsonc'),
+                issues: [{ path: ['agent', 'reviewer', 'mode'], message: 'Expected subagent, got read-only' }],
+              },
+            },
+            response: { status: 400 },
+          };
+        }
+        return ok({ id: options.path.id, directory: workspace });
+      },
       messages: async (options) => { calls.push(['messages', options]); return ok([]); },
       todo: async (options) => { calls.push(['todo', options]); return ok([{ id: 'todo_real1', status: 'completed' }]); },
       promptAsync: async (options) => { calls.push(['promptAsync', options]); return { data: {}, response: { status: 204 } }; },
@@ -79,6 +94,10 @@ test('plugin Desktop expone solo la API autenticada necesaria del SDK propietari
   assert.equal(calls.find(([name]) => name === 'promptAsync')[1].body.parts[0].text.length, objective.length);
   const todos = await fetch(`${descriptor.endpoint}/session/ses_real1/todo`, { headers });
   assert.deepEqual(await todos.json(), [{ id: 'todo_real1', status: 'completed' }]);
+  const invalid = await fetch(`${descriptor.endpoint}/session/ses_configinvalid`, { headers });
+  assert.equal(invalid.status, 400);
+  const invalidBody = await invalid.json();
+  assert.match(invalidBody.error, /opencode\.jsonc.*agent\.reviewer\.mode.*subagent.*read-only/iu);
   assert.equal(typeof hooks.event, 'function');
   assert.equal(typeof hooks.dispose, 'function');
   assert.equal(Object.hasOwn(hooks, 'permission.ask'), false);

@@ -8,8 +8,9 @@ const { hardenRpmSpec } = require('../scripts/prepare-linux-rpm-maker.cjs');
 const root = path.resolve(__dirname, '..');
 
 test('renderer, puente y ventana Desktop conservan aislamiento estricto', async () => {
-  const [main, preload, renderer, html, plugin] = await Promise.all([
+  const [main, mainSource, preload, renderer, html, plugin] = await Promise.all([
     readFile(path.join(root, 'dist', 'desktop', 'main.js'), 'utf8'),
+    readFile(path.join(root, 'src', 'desktop', 'main.ts'), 'utf8'),
     readFile(path.join(root, 'dist', 'desktop', 'preload.cjs'), 'utf8'),
     readFile(path.join(root, 'dist', 'desktop', 'renderer', 'app.js'), 'utf8'),
     readFile(path.join(root, 'dist', 'desktop', 'renderer', 'index.html'), 'utf8'),
@@ -21,6 +22,11 @@ test('renderer, puente y ventana Desktop conservan aislamiento estricto', async 
   assert.match(main, /setPermissionRequestHandler/u);
   assert.match(preload, /contextBridge\.exposeInMainWorld/u);
   assert.match(preload, /webUtils\.getPathForFile/u);
+  assert.match(preload, /sessions:open-project/u);
+  assert.match(preload, /sessions:copy-internal-link/u);
+  assert.doesNotMatch(preload, /openExternal/u);
+  assert.match(mainSource, /shell\.openExternal\(buildOpenCodeProjectUrl\(input\.workspace\)\)/u);
+  assert.match(mainSource, /clipboard\.writeText\(buildOpenCodeInternalSessionLink\(input\.sessionId\)\)/u);
   assert.doesNotMatch(renderer, /\.innerHTML\b|\beval\s*\(|setInterval\s*\(/u);
   assert.match(html, /Content-Security-Policy/u);
   assert.match(html, /id="auto-approve-input"[^>]*>/u);
@@ -33,9 +39,11 @@ test('renderer, puente y ventana Desktop conservan aislamiento estricto', async 
 });
 
 test('renderer conserva navegación y foco accesibles en sesiones', async () => {
-  const [renderer, css] = await Promise.all([
+  const [renderer, rendererSource, css, html] = await Promise.all([
     readFile(path.join(root, 'dist', 'desktop', 'renderer', 'app.js'), 'utf8'),
+    readFile(path.join(root, 'src', 'desktop', 'renderer', 'app.ts'), 'utf8'),
     readFile(path.join(root, 'dist', 'desktop', 'renderer', 'app.css'), 'utf8'),
+    readFile(path.join(root, 'dist', 'desktop', 'renderer', 'index.html'), 'utf8'),
   ]);
   assert.match(renderer, /\(currentIndex \+ direction \+ tabs\.length\) % tabs\.length/u);
   assert.match(renderer, /sessionFocusFallback/u);
@@ -45,6 +53,29 @@ test('renderer conserva navegación y foco accesibles en sesiones', async () => 
   assert.match(renderer, /autoApproveInput\.disabled\s*=\s*Boolean\(target\)/u);
   assert.match(renderer, /Confirma los permisos directamente en OpenCode Desktop/u);
   assert.match(renderer, /resolveDroppedAttachments/u);
+  assert.match(renderer, /openOpenCodeProject/u);
+  assert.match(renderer, /copyOpenCodeSessionLink/u);
+  assert.match(renderer, /Abrir proyecto en OpenCode/u);
+  assert.match(renderer, /Copiar enlace interno/u);
+  assert.match(rendererSource, /function workspaceBasename\(workspace: string\)/u);
+  assert.match(rendererSource, /meta\.textContent = `\$\{workspaceName\} ·/u);
+  assert.match(rendererSource, /meta\.title = session\.workspace/u);
+  assert.match(rendererSource, /Workspace \$\{workspaceName\}: \$\{session\.workspace\}/u);
+  assert.match(rendererSource, /const trustedDesktopSessions = sessionConnection\?\.attach === null/u);
+  assert.match(rendererSource, /if \(trustedDesktopSessions\) \{/u);
+  assert.match(rendererSource, /openProject\.dataset\.sessionId = session\.id/u);
+  assert.match(rendererSource, /copyLink\.dataset\.sessionId = session\.id/u);
+  assert.match(rendererSource, /button\.dataset\.sessionAction === focusedSessionAction/u);
+  assert.match(rendererSource, /const trustedDesktopSession = run\.attach === null/u);
+  assert.match(rendererSource, /ui\.inspectSessionActions\.hidden = !trustedDesktopSession/u);
+  assert.match(rendererSource, /ui\.inspectOpenProjectButton\.disabled = !trustedDesktopSession/u);
+  assert.match(html, /id="inspect-open-project-button"/u);
+  assert.match(html, /id="inspect-copy-session-link-button"/u);
+  assert.match(
+    rendererSource,
+    /if \(dialogMode === 'connect'\) \{\s*await loadSessions\(connectionInput\(\)\);\s*closeRunDialog\(\);/u,
+    'el modal solo puede cerrarse después de que el catálogo conecte correctamente',
+  );
   assert.match(css, /\.session-item:focus/u);
 });
 
