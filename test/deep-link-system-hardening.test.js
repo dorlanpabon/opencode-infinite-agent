@@ -47,6 +47,11 @@ test('integración del protocolo cubre cold start, segunda instancia y macOS sin
   assert.match(main, /app\.on\('open-url',[\s\S]*queueDeepLink\(url\)/u);
   assert.match(main, /setAsDefaultProtocolClient\('opencode-infinite'\)/u);
   assert.match(main, /setAsDefaultProtocolClient\('opencode-infinite', process\.execPath/u);
+  assert.match(main, /process\.argv\[1\]/u);
+  assert.match(main, /--squirrel-install/u);
+  assert.match(main, /--squirrel-updated/u);
+  assert.match(main, /--squirrel-uninstall/u);
+  assert.match(main, /removeAsDefaultProtocolClient\('opencode-infinite'\)/u);
   assert.match(main, /window\.loadURL\(`\$\{DESKTOP_ORIGIN\}\/index\.html`\)/u);
 
   const selector = renderer.slice(

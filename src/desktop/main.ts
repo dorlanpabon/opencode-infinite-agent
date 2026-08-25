@@ -162,6 +162,16 @@ function registerDefaultProtocolClient(): void {
   }
 }
 
+function handleSquirrelProtocolLifecycle(): void {
+  if (!squirrelStartup || process.platform !== 'win32') return;
+  const command = process.argv[1];
+  if (command === '--squirrel-install' || command === '--squirrel-updated') {
+    app.setAsDefaultProtocolClient('opencode-infinite');
+  } else if (command === '--squirrel-uninstall') {
+    app.removeAsDefaultProtocolClient('opencode-infinite');
+  }
+}
+
 function assertTrustedSender(event: IpcMainInvokeEvent): void {
   const senderUrl = event.senderFrame?.url;
   if (!mainWindow || event.sender !== mainWindow.webContents || typeof senderUrl !== 'string') {
@@ -425,6 +435,7 @@ function createWindow(): BrowserWindow {
 }
 
 const hasSingleInstanceLock = !squirrelStartup && app.requestSingleInstanceLock();
+handleSquirrelProtocolLifecycle();
 if (squirrelStartup || !hasSingleInstanceLock) {
   app.quit();
 } else {
