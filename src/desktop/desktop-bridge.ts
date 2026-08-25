@@ -105,6 +105,50 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function errorStatus(value: unknown): number | null {
+  if (!isRecord(value)) return null;
+  const status = Number(value.status);
+  return Number.isInteger(status) && status >= 400 && status <= 599 ? status : null;
+}
+
+function isConfigInvalidFailure(value: unknown): boolean {
+  const name = isRecord(value) && typeof value.name === 'string' ? value.name : '';
+  const message = value instanceof Error
+    ? value.message
+    : isRecord(value) && typeof value.message === 'string' ? value.message : '';
+  return name === 'ConfigInvalidError'
+    || /ConfigInvalidError|configuraci[oó]n(?: de OpenCode)? inv[aá]lida|configuration (?:is )?invalid/iu.test(message);
+}
+
+function sanitizedBridgeFailure(value: unknown): Error {
+  const status = errorStatus(value);
+  const source = value instanceof Error
+    ? value.message
+    : isRecord(value) && typeof value.message === 'string' ? value.message : 'OpenCode Desktop rechazó la sesión solicitada.';
+  const message = source
+    .replace(/\u001B\[[0-?]*[ -/]*[@-~]/gu, '')
+    .replace(/[\r\n\t]+/gu, ' ')
+    .replace(/(authorization\s*:\s*(?:basic|bearer)\s+)[^\s,;]+/giu, '$1[REDACTED]')
+    .replace(/((?:password|token|secret|api[_-]?key)"?\s*[=:]\s*"?)[^\s,;"}]+/giu, '$1[REDACTED]')
+    .replace(/\b(?:sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16})\b/gu, '[REDACTED]')
+    .trim()
+    .slice(0, 2_000) || 'OpenCode Desktop rechazó la sesión solicitada.';
+  const failure = new Error(message) as Error & { status?: number };
+  failure.name = isConfigInvalidFailure(value) ? 'ConfigInvalidError' : 'OpenCodeDesktopError';
+  if (status !== null) failure.status = status;
+  return failure;
+}
+
+function preferredAdoptionFailure(attempts: PromiseSettledResult<unknown>[]): Error | null {
+  const rejections = attempts.flatMap((attempt) => attempt.status === 'rejected' ? [attempt.reason] : []);
+  const selected = rejections.find(isConfigInvalidFailure)
+    ?? rejections.find((reason) => {
+      const status = errorStatus(reason);
+      return status !== null && status >= 400 && status < 500;
+    });
+  return selected === undefined ? null : sanitizedBridgeFailure(selected);
+}
+
 function normalizedPath(value: string): string {
   const resolved = path.resolve(value);
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
@@ -554,7 +598,10 @@ export class OpenCodeDesktopBridgeCatalog {
     }));
     const matches = attempts.flatMap((attempt) => attempt.status === 'fulfilled' && attempt.value ? [attempt.value] : []);
     matches.sort((a, b) => b.score - a.score);
-    return matches[0] ?? null;
+    if (matches[0]) return matches[0];
+    const failure = preferredAdoptionFailure(attempts);
+    if (failure) throw failure;
+    return null;
   }
 
   private async discover(buildId: string): Promise<DesktopBridgeDescriptor[]> {

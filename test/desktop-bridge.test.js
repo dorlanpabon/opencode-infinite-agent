@@ -122,6 +122,42 @@ test('catálogo Desktop agrega sesiones globales y adopta un oc:// exacto con su
   assert.equal(fx.calls.filter((call) => call.type === 'register').at(-1).token, fx.descriptor.token);
 });
 
+test('connect propaga ConfigInvalidError sanitizado cuando GET de la sesión exacta responde 400', async (t) => {
+  const fx = await fixture();
+  t.after(() => rm(fx.root, { recursive: true, force: true }));
+  await writeFile(path.join(fx.registry, 'bridge.json'), JSON.stringify(fx.descriptor));
+  const originalRequest = fx.dependencies.server.request;
+  fx.dependencies.server.request = async (...args) => {
+    if (args[2] === '/session/ses_configinvalid1') {
+      const error = new Error(
+        'HTTP 400 en GET /session/ses_configinvalid1: ConfigInvalidError: Configuración de OpenCode inválida; token="bridge-secret-value"',
+      );
+      error.status = 400;
+      throw error;
+    }
+    return originalRequest(...args);
+  };
+  const catalog = new OpenCodeDesktopBridgeCatalog(() => undefined, fx.dependencies);
+  t.after(() => catalog.close());
+
+  await assert.rejects(
+    catalog.connect({
+      workspace: fx.workspace,
+      binary: null,
+      attach: null,
+      sessionRef: 'ses_configinvalid1',
+    }),
+    (error) => {
+      assert.equal(error.name, 'ConfigInvalidError');
+      assert.equal(error.status, 400);
+      assert.match(error.message, /Configuración de OpenCode inválida/iu);
+      assert.match(error.message, /token="\[REDACTED\]/u);
+      assert.doesNotMatch(error.message, /bridge-secret-value/u);
+      return true;
+    },
+  );
+});
+
 test('conexiones iguales se comparten y un SSE que no abre falla con tiempo acotado', async (t) => {
   const fx = await fixture();
   t.after(() => rm(fx.root, { recursive: true, force: true }));

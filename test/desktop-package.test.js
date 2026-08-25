@@ -39,8 +39,9 @@ test('renderer, puente y ventana Desktop conservan aislamiento estricto', async 
 });
 
 test('renderer conserva navegación y foco accesibles en sesiones', async () => {
-  const [renderer, css, html] = await Promise.all([
+  const [renderer, rendererSource, css, html] = await Promise.all([
     readFile(path.join(root, 'dist', 'desktop', 'renderer', 'app.js'), 'utf8'),
+    readFile(path.join(root, 'src', 'desktop', 'renderer', 'app.ts'), 'utf8'),
     readFile(path.join(root, 'dist', 'desktop', 'renderer', 'app.css'), 'utf8'),
     readFile(path.join(root, 'dist', 'desktop', 'renderer', 'index.html'), 'utf8'),
   ]);
@@ -58,6 +59,11 @@ test('renderer conserva navegación y foco accesibles en sesiones', async () => 
   assert.match(renderer, /Copiar enlace interno/u);
   assert.match(html, /id="inspect-open-project-button"/u);
   assert.match(html, /id="inspect-copy-session-link-button"/u);
+  assert.match(
+    rendererSource,
+    /if \(dialogMode === 'connect'\) \{\s*await loadSessions\(connectionInput\(\)\);\s*closeRunDialog\(\);/u,
+    'el modal solo puede cerrarse después de que el catálogo conecte correctamente',
+  );
   assert.match(css, /\.session-item:focus/u);
 });
 
