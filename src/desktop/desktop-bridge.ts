@@ -167,7 +167,12 @@ function sessionIdFromReference(value: string | null): string | null {
 }
 
 function connectionKey(input: SessionConnectionInput): string {
-  return sessionIdFromReference(input.sessionRef) ?? '';
+  return JSON.stringify([
+    normalizedPath(input.workspace),
+    input.attach ?? '',
+    input.binary ? normalizedPath(input.binary) : '',
+    input.sessionRef ?? '',
+  ]);
 }
 
 async function waitForStream(stream: EventStream, timeoutMs: number, controller: AbortController): Promise<void> {

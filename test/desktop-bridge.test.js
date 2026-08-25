@@ -191,6 +191,58 @@ test('conexiones iguales se comparten y un SSE que no abre falla con tiempo acot
   assert.equal(aborted, true);
 });
 
+test('conexiones concurrentes del mismo ID conservan workspaces y rutas separados', async (t) => {
+  const fx = await fixture();
+  t.after(() => rm(fx.root, { recursive: true, force: true }));
+  await writeFile(path.join(fx.registry, 'bridge.json'), JSON.stringify(fx.descriptor));
+  const originalRequest = fx.dependencies.server.request;
+  const routeDirectories = [];
+  let releaseFirst;
+  let markFirstStarted;
+  const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
+  const firstStarted = new Promise((resolve) => { markFirstStarted = resolve; });
+  fx.dependencies.server.request = async (...args) => {
+    const [, , pathname, , options] = args;
+    if (pathname !== '/session/ses_concurrent1') return originalRequest(...args);
+    routeDirectories.push(options.directory);
+    if (options.directory === fx.workspace) {
+      markFirstStarted();
+      await firstGate;
+    }
+    return {
+      id: 'ses_concurrent1',
+      title: 'Concurrente',
+      directory: options.directory,
+      projectID: 'global',
+      time: { created: 5, updated: 6 },
+    };
+  };
+  const catalog = new OpenCodeDesktopBridgeCatalog(() => undefined, fx.dependencies);
+  t.after(() => catalog.close());
+  const sessionRef = 'oc://renderer/server/c2lkZWNhcg/session/ses_concurrent1';
+
+  const firstPromise = catalog.connect({
+    workspace: fx.workspace,
+    binary: null,
+    attach: null,
+    sessionRef,
+  });
+  await firstStarted;
+  const secondPromise = catalog.connect({
+    workspace: fx.otherWorkspace,
+    binary: null,
+    attach: null,
+    sessionRef,
+  });
+  releaseFirst();
+  const [first, second] = await Promise.all([firstPromise, secondPromise]);
+
+  assert.notStrictEqual(first, second);
+  assert.equal(first.sessions.find((session) => session.id === 'ses_concurrent1')?.workspace, fx.workspace);
+  assert.equal(second.sessions.find((session) => session.id === 'ses_concurrent1')?.workspace, fx.otherWorkspace);
+  assert.deepEqual(routeDirectories, [fx.workspace, fx.otherWorkspace]);
+});
+
 test('adopción rechaza una sesión exacta si el bridge no pertenece a su proyecto', async (t) => {
   const fx = await fixture();
   t.after(() => rm(fx.root, { recursive: true, force: true }));
