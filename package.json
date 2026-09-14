@@ -78,7 +78,7 @@
     "@types/electron-squirrel-startup": "^1.0.2",
     "@types/node": "^22.20.1",
     "electron": "^43.4.1",
-    "playwright": "^1.62.1",
+    "playwright": "^1.63.0",
     "typescript": "^7.0.2"
   }
 }
